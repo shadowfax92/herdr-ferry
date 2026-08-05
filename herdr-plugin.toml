@@ -1,0 +1,30 @@
+id = "shadowfax.ferry"
+name = "Herdr Ferry"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Move live panes and whole tabs between workspaces from a native popup."
+platforms = ["macos"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
+
+[[actions]]
+id = "open"
+title = "Open Ferry"
+description = "Choose a pane or tab and move it to another destination."
+contexts = ["pane"]
+command = ["./target/release/herdr-ferry", "open"]
+
+[[actions]]
+id = "install-keybindings"
+title = "Install Ferry keybinding"
+description = "Bind prefix+m to open Ferry."
+command = ["./target/release/herdr-ferry", "install-keybindings"]
+
+[[panes]]
+id = "picker"
+title = "Ferry"
+placement = "popup"
+width = 76
+height = 24
+command = ["./target/release/herdr-ferry", "picker"]

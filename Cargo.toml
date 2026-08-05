@@ -1,0 +1,27 @@
+[package]
+name = "herdr-ferry"
+version = "0.1.0"
+edition = "2021"
+description = "Move live Herdr panes and tabs between workspaces"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+ratatui = "0.30.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml_edit = "0.24"
+unicode-width = "0.2"
+uuid = { version = "1.22", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3.23"
+
+[lib]
+name = "herdr_ferry"
+path = "src/lib.rs"
+
+[[bin]]
+name = "herdr-ferry"
+path = "src/main.rs"
