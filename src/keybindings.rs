@@ -12,7 +12,7 @@ use crate::herdr::Herdr;
 
 const KEY: &str = "prefix+m";
 const COMMAND: &str = "shadowfax.ferry.open";
-const DESCRIPTION: &str = "Move a pane or tab with Ferry";
+const DESCRIPTION: &str = "Move panes or tabs, or merge workspaces with Ferry";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InstallOutcome {
@@ -252,6 +252,7 @@ description = "Scratch"
         let updated = fs::read_to_string(&path).unwrap();
         assert!(updated.contains("shadowfax.scratch.toggle-nvim"));
         assert!(updated.contains("shadowfax.ferry.open"));
+        assert!(updated.contains(DESCRIPTION));
         assert_eq!(install(&path).unwrap(), InstallOutcome::Unchanged);
     }
 

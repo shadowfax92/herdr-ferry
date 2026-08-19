@@ -85,7 +85,7 @@ Herdr named sessions are separate server processes and Herdr 0.8 has no cross-se
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 cargo build --release --locked
 ```
