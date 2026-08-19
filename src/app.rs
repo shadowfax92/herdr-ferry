@@ -36,16 +36,20 @@ pub enum TabDestination {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MovePaneRequest {
-    pub source_pane_id: String,
-    pub source_tab_id: String,
+    pub sources: Vec<PaneSource>,
     pub direction: SplitDirection,
     pub destination: PaneDestination,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneSource {
+    pub pane_id: String,
+    pub expected_tab_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MoveTabRequest {
-    pub source_tab_id: String,
-    pub source_pane_id: String,
+    pub tab_ids: Vec<String>,
     pub destination: TabDestination,
 }
 
@@ -69,6 +73,7 @@ pub struct DisplayRow {
     pub title: String,
     pub detail: String,
     pub tone: RowTone,
+    pub checked: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -76,8 +81,8 @@ enum Stage {
     Kind,
     PaneSource,
     TabSource,
-    PaneDestination(PaneInfo),
-    TabDestination(TabInfo),
+    PaneDestination(Vec<PaneInfo>),
+    TabDestination(Vec<TabInfo>),
 }
 
 #[derive(Clone, Debug)]
@@ -86,7 +91,7 @@ enum Choice {
     Pane(PaneInfo),
     Tab(TabInfo),
     PaneTab(TabInfo),
-    PaneNewTab,
+    PaneNewTab(WorkspaceInfo),
     PaneNewWorkspace,
     TabWorkspace(WorkspaceInfo),
     TabNewWorkspace,
@@ -98,6 +103,7 @@ struct Candidate {
     row: DisplayRow,
     search: String,
     pinned: bool,
+    source_key: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +114,7 @@ pub struct App {
     stage: Stage,
     query: String,
     selected: usize,
+    checked_sources: Vec<String>,
     failure: Option<String>,
     working: Option<String>,
 }
@@ -128,6 +135,7 @@ impl App {
             stage: Stage::Kind,
             query: String::new(),
             selected: 0,
+            checked_sources: Vec::new(),
             failure: None,
             working: None,
         })
@@ -165,6 +173,32 @@ impl App {
                 }
                 KeyCode::Char('t' | 'T') => {
                     self.enter_source(MoveKind::Tab);
+                    return InputOutcome::Continue;
+                }
+                _ => {}
+            }
+        }
+
+        if self.is_source_stage() {
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('a' | 'A'))
+            {
+                self.toggle_all_visible();
+                return InputOutcome::Continue;
+            }
+            match key.code {
+                KeyCode::Char(' ') => {
+                    self.toggle_current_source();
+                    return InputOutcome::Continue;
+                }
+                KeyCode::Tab => {
+                    self.toggle_current_source();
+                    self.move_selection(1);
+                    return InputOutcome::Continue;
+                }
+                KeyCode::BackTab => {
+                    self.toggle_current_source();
+                    self.move_selection(-1);
                     return InputOutcome::Continue;
                 }
                 _ => {}
@@ -223,13 +257,25 @@ impl App {
         !matches!(self.stage, Stage::Kind)
     }
 
-    pub fn heading(&self) -> &'static str {
+    pub fn heading(&self) -> String {
         match self.stage {
-            Stage::Kind => "What should cross?",
-            Stage::PaneSource => "Choose a pane",
-            Stage::TabSource => "Choose a tab",
-            Stage::PaneDestination(_) => "Choose a destination tab",
-            Stage::TabDestination(_) => "Choose a destination workspace",
+            Stage::Kind => "What should cross?".into(),
+            Stage::PaneSource => source_heading("pane", self.checked_sources.len()),
+            Stage::TabSource => source_heading("tab", self.checked_sources.len()),
+            Stage::PaneDestination(ref sources) => {
+                format!(
+                    "Move {} {} to…",
+                    sources.len(),
+                    plural("pane", sources.len())
+                )
+            }
+            Stage::TabDestination(ref sources) => {
+                format!(
+                    "Move {} {} to…",
+                    sources.len(),
+                    plural("tab", sources.len())
+                )
+            }
         }
     }
 
@@ -261,16 +307,16 @@ impl App {
         }
     }
 
-    pub fn footer(&self) -> &'static str {
+    pub fn footer(&self) -> String {
         match self.stage {
-            Stage::Kind => "↑↓ navigate   enter choose   p/t shortcut   esc close",
+            Stage::Kind => "↑↓ navigate   enter choose   p/t shortcut   esc close".into(),
             Stage::PaneSource | Stage::TabSource => {
-                "type to filter   ↑↓ navigate   enter choose   esc back"
+                "space/tab select   ctrl+a all   enter continue   esc back".into()
             }
             Stage::PaneDestination(_) => {
-                "enter split right   alt+d split down   ↑↓ navigate   esc back"
+                "enter split right   alt+d split down   ↑↓ navigate   esc back".into()
             }
-            Stage::TabDestination(_) => "enter move   ↑↓ navigate   esc back",
+            Stage::TabDestination(_) => "enter move   ↑↓ navigate   esc back".into(),
         }
     }
 
@@ -299,31 +345,35 @@ impl App {
             Stage::PaneSource => {
                 self.stage = Stage::Kind;
                 self.selected = 0;
+                self.checked_sources.clear();
             }
             Stage::TabSource => {
                 self.stage = Stage::Kind;
                 self.selected = 1;
+                self.checked_sources.clear();
             }
-            Stage::PaneDestination(source) => {
+            Stage::PaneDestination(sources) => {
                 self.stage = Stage::PaneSource;
                 self.query.clear();
+                let first = sources.first().map(|source| source.pane_id.as_str());
                 self.selected = self
                     .candidates()
                     .iter()
                     .position(|candidate| {
-                        matches!(&candidate.choice, Choice::Pane(pane) if pane.pane_id == source.pane_id)
+                        matches!(&candidate.choice, Choice::Pane(pane) if Some(pane.pane_id.as_str()) == first)
                     })
                     .unwrap_or(0);
                 return InputOutcome::Continue;
             }
-            Stage::TabDestination(source) => {
+            Stage::TabDestination(sources) => {
                 self.stage = Stage::TabSource;
                 self.query.clear();
+                let first = sources.first().map(|source| source.tab_id.as_str());
                 self.selected = self
                     .candidates()
                     .iter()
                     .position(|candidate| {
-                        matches!(&candidate.choice, Choice::Tab(tab) if tab.tab_id == source.tab_id)
+                        matches!(&candidate.choice, Choice::Tab(tab) if Some(tab.tab_id.as_str()) == first)
                     })
                     .unwrap_or(0);
                 return InputOutcome::Continue;
@@ -341,6 +391,7 @@ impl App {
         };
         self.query.clear();
         self.selected = 0;
+        self.checked_sources.clear();
         self.failure = None;
     }
 
@@ -354,49 +405,46 @@ impl App {
                 InputOutcome::Continue
             }
             Choice::Pane(pane) => {
-                self.stage = Stage::PaneDestination(pane);
+                self.stage = Stage::PaneDestination(self.chosen_panes(pane));
                 self.query.clear();
                 self.selected = 0;
                 InputOutcome::Continue
             }
             Choice::Tab(tab) => {
-                self.stage = Stage::TabDestination(tab);
+                self.stage = Stage::TabDestination(self.chosen_tabs(tab));
                 self.query.clear();
                 self.selected = 0;
                 InputOutcome::Continue
             }
             Choice::PaneTab(tab) => {
-                let Stage::PaneDestination(source) = &self.stage else {
+                let Stage::PaneDestination(sources) = &self.stage else {
                     return InputOutcome::Continue;
                 };
                 InputOutcome::MovePane(MovePaneRequest {
-                    source_pane_id: source.pane_id.clone(),
-                    source_tab_id: source.tab_id.clone(),
+                    sources: pane_sources(sources),
                     direction,
                     destination: PaneDestination::ExistingTab { tab_id: tab.tab_id },
                 })
             }
-            Choice::PaneNewTab => {
-                let Stage::PaneDestination(source) = &self.stage else {
+            Choice::PaneNewTab(workspace) => {
+                let Stage::PaneDestination(sources) = &self.stage else {
                     return InputOutcome::Continue;
                 };
                 InputOutcome::MovePane(MovePaneRequest {
-                    source_pane_id: source.pane_id.clone(),
-                    source_tab_id: source.tab_id.clone(),
+                    sources: pane_sources(sources),
                     direction,
                     destination: PaneDestination::NewTab {
-                        workspace_id: source.workspace_id.clone(),
+                        workspace_id: workspace.workspace_id,
                         label: self.query_name(),
                     },
                 })
             }
             Choice::PaneNewWorkspace => {
-                let Stage::PaneDestination(source) = &self.stage else {
+                let Stage::PaneDestination(sources) = &self.stage else {
                     return InputOutcome::Continue;
                 };
                 InputOutcome::MovePane(MovePaneRequest {
-                    source_pane_id: source.pane_id.clone(),
-                    source_tab_id: source.tab_id.clone(),
+                    sources: pane_sources(sources),
                     direction,
                     destination: PaneDestination::NewWorkspace {
                         label: self.query_name(),
@@ -412,30 +460,90 @@ impl App {
         }
     }
 
-    fn tab_move_outcome(&mut self, destination: TabDestination) -> InputOutcome {
-        let Stage::TabDestination(source) = &self.stage else {
-            return InputOutcome::Continue;
-        };
-        let Some(source_pane) = self
-            .topology
-            .panes
-            .iter()
-            .find(|pane| pane.tab_id == source.tab_id && pane.focused)
-            .or_else(|| {
-                self.topology
-                    .panes
-                    .iter()
-                    .find(|pane| pane.tab_id == source.tab_id)
-            })
-        else {
-            self.set_failure("The selected tab no longer has a movable pane");
+    fn tab_move_outcome(&self, destination: TabDestination) -> InputOutcome {
+        let Stage::TabDestination(sources) = &self.stage else {
             return InputOutcome::Continue;
         };
         InputOutcome::MoveTab(MoveTabRequest {
-            source_tab_id: source.tab_id.clone(),
-            source_pane_id: source_pane.pane_id.clone(),
+            tab_ids: sources.iter().map(|source| source.tab_id.clone()).collect(),
             destination,
         })
+    }
+
+    fn is_source_stage(&self) -> bool {
+        matches!(self.stage, Stage::PaneSource | Stage::TabSource)
+    }
+
+    fn toggle_current_source(&mut self) {
+        let Some(key) = self
+            .visible_candidates()
+            .get(self.selected)
+            .and_then(|candidate| candidate.source_key.clone())
+        else {
+            return;
+        };
+        if let Some(index) = self
+            .checked_sources
+            .iter()
+            .position(|checked| checked == &key)
+        {
+            self.checked_sources.remove(index);
+        } else {
+            self.checked_sources.push(key);
+        }
+    }
+
+    fn toggle_all_visible(&mut self) {
+        let visible = self
+            .visible_candidates()
+            .into_iter()
+            .filter_map(|candidate| candidate.source_key)
+            .collect::<Vec<_>>();
+        if visible.is_empty() {
+            return;
+        }
+        if visible.iter().all(|key| self.checked_sources.contains(key)) {
+            self.checked_sources
+                .retain(|checked| !visible.contains(checked));
+        } else {
+            for key in visible {
+                if !self.checked_sources.contains(&key) {
+                    self.checked_sources.push(key);
+                }
+            }
+        }
+    }
+
+    fn chosen_panes(&self, fallback: PaneInfo) -> Vec<PaneInfo> {
+        if self.checked_sources.is_empty() {
+            return vec![fallback];
+        }
+        self.checked_sources
+            .iter()
+            .filter_map(|pane_id| {
+                self.topology
+                    .panes
+                    .iter()
+                    .find(|pane| &pane.pane_id == pane_id)
+                    .cloned()
+            })
+            .collect()
+    }
+
+    fn chosen_tabs(&self, fallback: TabInfo) -> Vec<TabInfo> {
+        if self.checked_sources.is_empty() {
+            return vec![fallback];
+        }
+        self.checked_sources
+            .iter()
+            .filter_map(|tab_id| {
+                self.topology
+                    .tabs
+                    .iter()
+                    .find(|tab| &tab.tab_id == tab_id)
+                    .cloned()
+            })
+            .collect()
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -457,20 +565,28 @@ impl App {
         if self.query.trim().is_empty() {
             return candidates;
         }
+        let checked = self
+            .checked_sources
+            .iter()
+            .filter_map(|key| {
+                candidates
+                    .iter()
+                    .find(|candidate| candidate.source_key.as_deref() == Some(key))
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
         let mut scored = candidates
             .iter()
             .enumerate()
-            .filter(|(_, candidate)| !candidate.pinned)
+            .filter(|(_, candidate)| !candidate.pinned && !candidate.row.checked)
             .filter_map(|(index, candidate)| {
                 fuzzy::score(&self.query, &candidate.search)
                     .map(|score| (Reverse(score), index, candidate.clone()))
             })
             .collect::<Vec<_>>();
         scored.sort_by_key(|(score, index, _)| (*score, *index));
-        let mut visible = scored
-            .into_iter()
-            .map(|(_, _, candidate)| candidate)
-            .collect::<Vec<_>>();
+        let mut visible = checked;
+        visible.extend(scored.into_iter().map(|(_, _, candidate)| candidate));
         visible.extend(candidates.into_iter().filter(|candidate| candidate.pinned));
         visible
     }
@@ -505,9 +621,11 @@ impl App {
                         .map(|pane| format!("focused · {}", self.pane_label(pane)))
                         .unwrap_or_else(|| "choose any live pane".into()),
                     tone: RowTone::Normal,
+                    checked: false,
                 },
                 search: String::new(),
                 pinned: false,
+                source_key: None,
             },
             Candidate {
                 choice: Choice::Kind(MoveKind::Tab),
@@ -524,9 +642,11 @@ impl App {
                         })
                         .unwrap_or_else(|| "preserve its live split layout".into()),
                     tone: RowTone::Normal,
+                    checked: false,
                 },
                 search: String::new(),
                 pinned: false,
+                source_key: None,
             },
         ]
     }
@@ -562,6 +682,8 @@ impl App {
             .into_iter()
             .map(|pane| {
                 let current = pane.pane_id == self.invoked_pane_id;
+                let checked = self.checked_sources.contains(&pane.pane_id);
+                let source_key = pane.pane_id.clone();
                 let title = self.pane_label(&pane);
                 let detail = format!(
                     "{} / {}{}",
@@ -588,9 +710,11 @@ impl App {
                         } else {
                             RowTone::Normal
                         },
+                        checked,
                     },
                     search,
                     pinned: false,
+                    source_key: Some(source_key),
                 }
             })
             .collect()
@@ -618,6 +742,8 @@ impl App {
         tabs.into_iter()
             .map(|tab| {
                 let current = tab.tab_id == self.invoked_tab_id;
+                let checked = self.checked_sources.contains(&tab.tab_id);
+                let source_key = tab.tab_id.clone();
                 let workspace = self.workspace_label(&tab.workspace_id);
                 let title = format!("{workspace} / {}", self.tab_label(&tab));
                 let detail = format!("{} panes · {}", tab.pane_count, tab.tab_id);
@@ -631,25 +757,35 @@ impl App {
                         } else {
                             RowTone::Normal
                         },
+                        checked,
                     },
                     search: format!("{title} {detail}"),
                     pinned: false,
+                    source_key: Some(source_key),
                 }
             })
             .collect()
     }
 
-    fn pane_destination_candidates(&self, source: &PaneInfo) -> Vec<Candidate> {
+    fn pane_destination_candidates(&self, sources: &[PaneInfo]) -> Vec<Candidate> {
+        let source_tabs = sources
+            .iter()
+            .map(|source| source.tab_id.as_str())
+            .collect::<Vec<_>>();
+        let source_workspaces = sources
+            .iter()
+            .map(|source| source.workspace_id.as_str())
+            .collect::<Vec<_>>();
         let mut tabs = self
             .topology
             .tabs
             .iter()
-            .filter(|tab| tab.tab_id != source.tab_id)
+            .filter(|tab| !source_tabs.contains(&tab.tab_id.as_str()))
             .cloned()
             .collect::<Vec<_>>();
         tabs.sort_by_key(|tab| {
             (
-                usize::from(tab.workspace_id != source.workspace_id),
+                usize::from(!source_workspaces.contains(&tab.workspace_id.as_str())),
                 self.workspace_number(&tab.workspace_id),
                 tab.number,
             )
@@ -666,9 +802,11 @@ impl App {
                         title: title.clone(),
                         detail: detail.clone(),
                         tone: RowTone::Normal,
+                        checked: false,
                     },
                     search: format!("{title} {detail}"),
                     pinned: false,
+                    source_key: None,
                 }
             })
             .collect::<Vec<_>>();
@@ -677,35 +815,50 @@ impl App {
             .as_deref()
             .map(|name| format!("create “{name}”"))
             .unwrap_or_else(|| "type to name it".into());
-        candidates.push(Candidate {
-            choice: Choice::PaneNewTab,
+        let mut workspaces = self.topology.workspaces.clone();
+        workspaces.sort_by_key(|workspace| {
+            (
+                usize::from(!source_workspaces.contains(&workspace.workspace_id.as_str())),
+                workspace.number,
+            )
+        });
+        candidates.extend(workspaces.into_iter().map(|workspace| Candidate {
+            choice: Choice::PaneNewTab(workspace.clone()),
             row: DisplayRow {
-                title: format!("New tab in {}", self.workspace_label(&source.workspace_id)),
+                title: format!("New tab in {}", self.workspace_name(&workspace)),
                 detail: preview.clone(),
                 tone: RowTone::Create,
+                checked: false,
             },
             search: String::new(),
             pinned: true,
-        });
+            source_key: None,
+        }));
         candidates.push(Candidate {
             choice: Choice::PaneNewWorkspace,
             row: DisplayRow {
                 title: "New workspace".into(),
                 detail: preview,
                 tone: RowTone::Create,
+                checked: false,
             },
             search: String::new(),
             pinned: true,
+            source_key: None,
         });
         candidates
     }
 
-    fn tab_destination_candidates(&self, source: &TabInfo) -> Vec<Candidate> {
+    fn tab_destination_candidates(&self, sources: &[TabInfo]) -> Vec<Candidate> {
+        let source_workspaces = sources
+            .iter()
+            .map(|source| source.workspace_id.as_str())
+            .collect::<Vec<_>>();
         let mut workspaces = self
             .topology
             .workspaces
             .iter()
-            .filter(|workspace| workspace.workspace_id != source.workspace_id)
+            .filter(|workspace| !source_workspaces.contains(&workspace.workspace_id.as_str()))
             .cloned()
             .collect::<Vec<_>>();
         workspaces.sort_by_key(|workspace| workspace.number);
@@ -723,9 +876,11 @@ impl App {
                         title: title.clone(),
                         detail: detail.clone(),
                         tone: RowTone::Normal,
+                        checked: false,
                     },
                     search: format!("{title} {detail}"),
                     pinned: false,
+                    source_key: None,
                 }
             })
             .collect::<Vec<_>>();
@@ -740,9 +895,11 @@ impl App {
                 title: "New workspace".into(),
                 detail,
                 tone: RowTone::Create,
+                checked: false,
             },
             search: String::new(),
             pinned: true,
+            source_key: None,
         });
         candidates
     }
@@ -816,6 +973,32 @@ impl App {
             .map(|tab| tab.number)
             .unwrap_or(usize::MAX)
     }
+}
+
+fn source_heading(noun: &str, count: usize) -> String {
+    if count == 0 {
+        format!("Choose one or more {}s", noun)
+    } else {
+        format!("{count} {} selected", plural(noun, count))
+    }
+}
+
+fn plural(noun: &str, count: usize) -> String {
+    if count == 1 {
+        noun.into()
+    } else {
+        format!("{noun}s")
+    }
+}
+
+fn pane_sources(sources: &[PaneInfo]) -> Vec<PaneSource> {
+    sources
+        .iter()
+        .map(|source| PaneSource {
+            pane_id: source.pane_id.clone(),
+            expected_tab_id: source.tab_id.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -963,14 +1146,99 @@ mod tests {
         assert_eq!(
             outcome,
             InputOutcome::MovePane(MovePaneRequest {
-                source_pane_id: "w1:p1".into(),
-                source_tab_id: "w1:t1".into(),
+                sources: vec![PaneSource {
+                    pane_id: "w1:p1".into(),
+                    expected_tab_id: "w1:t1".into(),
+                }],
                 direction: SplitDirection::Down,
                 destination: PaneDestination::ExistingTab {
                     tab_id: "w2:t1".into()
                 },
             })
         );
+    }
+
+    #[test]
+    fn pane_sources_support_ordered_multi_selection() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(app.heading(), "Move 2 panes to…");
+        assert!(!app
+            .rows()
+            .iter()
+            .any(|row| row.title.contains("source / main")));
+
+        app.selected = app.rows().len() - 1;
+        let InputOutcome::MovePane(request) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected pane move");
+        };
+        assert_eq!(
+            request.sources,
+            vec![
+                PaneSource {
+                    pane_id: "w1:p1".into(),
+                    expected_tab_id: "w1:t1".into(),
+                },
+                PaneSource {
+                    pane_id: "w1:p2".into(),
+                    expected_tab_id: "w1:t1".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn tab_sources_support_ordered_multi_selection() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Enter));
+
+        let InputOutcome::MoveTab(request) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected tab move");
+        };
+        assert_eq!(request.tab_ids, vec!["w1:t1", "w1:t2"]);
+        assert_eq!(
+            request.destination,
+            TabDestination::Workspace {
+                workspace_id: "w2".into()
+            }
+        );
+    }
+
+    #[test]
+    fn selected_sources_remain_visible_while_filtering() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char(' ')));
+        for character in "api".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+
+        assert_eq!(app.rows().len(), 2);
+        assert_eq!(app.rows()[0].title, "focused-pane");
+        assert!(app.rows()[0].checked);
+        assert_eq!(app.rows()[1].title, "api-server");
+    }
+
+    #[test]
+    fn ctrl_a_toggles_all_visible_sources() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+        assert!(app.rows().iter().all(|row| row.checked));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(app.rows().iter().all(|row| !row.checked));
     }
 
     #[test]

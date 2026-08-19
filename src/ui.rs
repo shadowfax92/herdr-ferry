@@ -82,10 +82,19 @@ pub fn render(app: &App, frame: &mut Frame) {
         let items = rows
             .into_iter()
             .map(|row| {
-                let (marker, marker_style) = match row.tone {
-                    RowTone::Normal => ("  ", Style::default()),
-                    RowTone::Current => ("● ", Style::default().fg(Color::Green)),
-                    RowTone::Create => ("＋ ", Style::default().fg(Color::Cyan)),
+                let (marker, marker_style) = if row.checked {
+                    (
+                        "✓ ",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    match row.tone {
+                        RowTone::Normal => ("  ", Style::default()),
+                        RowTone::Current => ("● ", Style::default().fg(Color::Green)),
+                        RowTone::Create => ("＋ ", Style::default().fg(Color::Cyan)),
+                    }
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(marker, marker_style),

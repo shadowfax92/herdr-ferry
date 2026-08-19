@@ -22,8 +22,11 @@ impl Mover {
     }
 
     pub fn move_pane(&self, request: &MovePaneRequest) -> Result<MoveSummary> {
-        let source = self.herdr.pane(&request.source_pane_id)?;
-        if source.tab_id != request.source_tab_id {
+        let [selected] = request.sources.as_slice() else {
+            bail!("multi-pane execution is not available");
+        };
+        let source = self.herdr.pane(&selected.pane_id)?;
+        if source.tab_id != selected.expected_tab_id {
             bail!("the source pane changed tabs while Ferry was open");
         }
         let moved = match &request.destination {
@@ -53,8 +56,24 @@ impl Mover {
     }
 
     pub fn move_tab(&self, request: &MoveTabRequest) -> Result<MoveSummary> {
-        let snapshot = self.herdr.layout(&request.source_pane_id)?;
-        if snapshot.tab_id != request.source_tab_id {
+        let [source_tab_id] = request.tab_ids.as_slice() else {
+            bail!("multi-tab execution is not available");
+        };
+        let topology = self.herdr.topology()?;
+        let source_pane_id = topology
+            .panes
+            .iter()
+            .find(|pane| pane.tab_id == *source_tab_id && pane.focused)
+            .or_else(|| {
+                topology
+                    .panes
+                    .iter()
+                    .find(|pane| pane.tab_id == *source_tab_id)
+            })
+            .map(|pane| pane.pane_id.as_str())
+            .context("the selected tab no longer has a movable pane")?;
+        let snapshot = self.herdr.layout(source_pane_id)?;
+        if snapshot.tab_id != *source_tab_id {
             bail!("the source tab changed while Ferry was open");
         }
         if snapshot.zoomed {
@@ -62,7 +81,6 @@ impl Mover {
         }
         let root = LayoutNode::from_snapshot(&snapshot)?;
         let total = root.leaves().len();
-        let topology = self.herdr.topology()?;
         self.validate_tab_source(&topology, &root, &snapshot.tab_id)?;
         let tab_label = topology
             .tabs
