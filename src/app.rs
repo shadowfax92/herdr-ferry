@@ -12,6 +12,7 @@ use crate::layout::SplitDirection;
 pub enum MoveKind {
     Pane,
     Tab,
+    Workspace,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,11 +55,18 @@ pub struct MoveTabRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeWorkspaceRequest {
+    pub source_workspace_id: String,
+    pub destination_workspace_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputOutcome {
     Continue,
     Cancel,
     MovePane(MovePaneRequest),
     MoveTab(MoveTabRequest),
+    MergeWorkspace(MergeWorkspaceRequest),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,8 +89,10 @@ enum Stage {
     Kind,
     PaneSource,
     TabSource,
+    WorkspaceSource,
     PaneDestination(Vec<PaneInfo>),
     TabDestination(Vec<TabInfo>),
+    WorkspaceDestination(WorkspaceInfo),
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +105,8 @@ enum Choice {
     PaneNewWorkspace,
     TabWorkspace(WorkspaceInfo),
     TabNewWorkspace,
+    WorkspaceSource(WorkspaceInfo),
+    WorkspaceDestination(WorkspaceInfo),
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +123,7 @@ pub struct App {
     topology: Topology,
     invoked_pane_id: String,
     invoked_tab_id: String,
+    invoked_workspace_id: String,
     stage: Stage,
     query: String,
     selected: usize,
@@ -122,16 +135,18 @@ pub struct App {
 impl App {
     pub fn new(topology: Topology, invoked_pane_id: impl Into<String>) -> Result<Self> {
         let invoked_pane_id = invoked_pane_id.into();
-        let invoked_tab_id = topology
+        let invoked = topology
             .panes
             .iter()
             .find(|pane| pane.pane_id == invoked_pane_id)
-            .map(|pane| pane.tab_id.clone())
             .with_context(|| format!("source pane is no longer available: {invoked_pane_id}"))?;
+        let invoked_tab_id = invoked.tab_id.clone();
+        let invoked_workspace_id = invoked.workspace_id.clone();
         Ok(Self {
             topology,
             invoked_pane_id,
             invoked_tab_id,
+            invoked_workspace_id,
             stage: Stage::Kind,
             query: String::new(),
             selected: 0,
@@ -175,6 +190,10 @@ impl App {
                     self.enter_source(MoveKind::Tab);
                     return InputOutcome::Continue;
                 }
+                KeyCode::Char('w' | 'W') => {
+                    self.enter_source(MoveKind::Workspace);
+                    return InputOutcome::Continue;
+                }
                 _ => {}
             }
         }
@@ -192,13 +211,11 @@ impl App {
                     return InputOutcome::Continue;
                 }
                 KeyCode::Tab => {
-                    self.toggle_current_source();
-                    self.move_selection(1);
+                    self.toggle_source_and_move(1);
                     return InputOutcome::Continue;
                 }
                 KeyCode::BackTab => {
-                    self.toggle_current_source();
-                    self.move_selection(-1);
+                    self.toggle_source_and_move(-1);
                     return InputOutcome::Continue;
                 }
                 _ => {}
@@ -262,6 +279,7 @@ impl App {
             Stage::Kind => "What should cross?".into(),
             Stage::PaneSource => source_heading("pane", self.checked_sources.len()),
             Stage::TabSource => source_heading("tab", self.checked_sources.len()),
+            Stage::WorkspaceSource => "Choose a workspace to merge".into(),
             Stage::PaneDestination(ref sources) => {
                 format!(
                     "Move {} {} to…",
@@ -276,6 +294,9 @@ impl App {
                     plural("tab", sources.len())
                 )
             }
+            Stage::WorkspaceDestination(ref source) => {
+                format!("Merge {} into…", self.workspace_name(source))
+            }
         }
     }
 
@@ -284,16 +305,20 @@ impl App {
             Stage::Kind => "",
             Stage::PaneSource => "search panes",
             Stage::TabSource => "search tabs",
+            Stage::WorkspaceSource => "search source workspaces",
             Stage::PaneDestination(_) => "search destinations or name a new one",
             Stage::TabDestination(_) => "search workspaces or name a new one",
+            Stage::WorkspaceDestination(_) => "search destination workspaces",
         }
     }
 
     pub fn step(&self) -> usize {
         match self.stage {
             Stage::Kind => 1,
-            Stage::PaneSource | Stage::TabSource => 2,
-            Stage::PaneDestination(_) | Stage::TabDestination(_) => 3,
+            Stage::PaneSource | Stage::TabSource | Stage::WorkspaceSource => 2,
+            Stage::PaneDestination(_)
+            | Stage::TabDestination(_)
+            | Stage::WorkspaceDestination(_) => 3,
         }
     }
 
@@ -302,21 +327,27 @@ impl App {
             Stage::Kind => "move  ›  source  ›  destination",
             Stage::PaneSource => "pane  ›  source  ›  destination",
             Stage::TabSource => "tab  ›  source  ›  destination",
+            Stage::WorkspaceSource => "workspace  ›  source  ›  destination",
             Stage::PaneDestination(_) => "pane  ›  source  ›  destination",
             Stage::TabDestination(_) => "tab  ›  source  ›  destination",
+            Stage::WorkspaceDestination(_) => "workspace  ›  source  ›  destination",
         }
     }
 
     pub fn footer(&self) -> String {
         match self.stage {
-            Stage::Kind => "↑↓ navigate   enter choose   p/t shortcut   esc close".into(),
+            Stage::Kind => "↑↓ navigate   enter choose   p/t/w shortcut   esc close".into(),
             Stage::PaneSource | Stage::TabSource => {
                 "space/tab select   ctrl+a all   enter continue   esc back".into()
+            }
+            Stage::WorkspaceSource => {
+                "type to filter   ↑↓ navigate   enter choose   esc back".into()
             }
             Stage::PaneDestination(_) => {
                 "enter split right   alt+d split down   ↑↓ navigate   esc back".into()
             }
             Stage::TabDestination(_) => "enter move   ↑↓ navigate   esc back".into(),
+            Stage::WorkspaceDestination(_) => "enter merge   ↑↓ navigate   esc back".into(),
         }
     }
 
@@ -352,6 +383,10 @@ impl App {
                 self.selected = 1;
                 self.checked_sources.clear();
             }
+            Stage::WorkspaceSource => {
+                self.stage = Stage::Kind;
+                self.selected = 2;
+            }
             Stage::PaneDestination(sources) => {
                 self.stage = Stage::PaneSource;
                 self.query.clear();
@@ -378,6 +413,22 @@ impl App {
                     .unwrap_or(0);
                 return InputOutcome::Continue;
             }
+            Stage::WorkspaceDestination(source) => {
+                self.stage = Stage::WorkspaceSource;
+                self.query.clear();
+                self.selected = self
+                    .candidates()
+                    .iter()
+                    .position(|candidate| {
+                        matches!(
+                            &candidate.choice,
+                            Choice::WorkspaceSource(workspace)
+                                if workspace.workspace_id == source.workspace_id
+                        )
+                    })
+                    .unwrap_or(0);
+                return InputOutcome::Continue;
+            }
         }
         self.query.clear();
         self.failure = None;
@@ -388,6 +439,7 @@ impl App {
         self.stage = match kind {
             MoveKind::Pane => Stage::PaneSource,
             MoveKind::Tab => Stage::TabSource,
+            MoveKind::Workspace => Stage::WorkspaceSource,
         };
         self.query.clear();
         self.selected = 0;
@@ -412,6 +464,12 @@ impl App {
             }
             Choice::Tab(tab) => {
                 self.stage = Stage::TabDestination(self.chosen_tabs(tab));
+                self.query.clear();
+                self.selected = 0;
+                InputOutcome::Continue
+            }
+            Choice::WorkspaceSource(workspace) => {
+                self.stage = Stage::WorkspaceDestination(workspace);
                 self.query.clear();
                 self.selected = 0;
                 InputOutcome::Continue
@@ -457,6 +515,15 @@ impl App {
             Choice::TabNewWorkspace => self.tab_move_outcome(TabDestination::NewWorkspace {
                 label: self.query_name(),
             }),
+            Choice::WorkspaceDestination(destination) => {
+                let Stage::WorkspaceDestination(source) = &self.stage else {
+                    return InputOutcome::Continue;
+                };
+                InputOutcome::MergeWorkspace(MergeWorkspaceRequest {
+                    source_workspace_id: source.workspace_id.clone(),
+                    destination_workspace_id: destination.workspace_id,
+                })
+            }
         }
     }
 
@@ -482,14 +549,41 @@ impl App {
         else {
             return;
         };
+        self.toggle_source(&key);
+    }
+
+    fn toggle_source_and_move(&mut self, delta: isize) {
+        let visible = self.visible_candidates();
+        if visible.is_empty() {
+            return;
+        }
+        let Some(current_key) = visible
+            .get(self.selected)
+            .and_then(|candidate| candidate.source_key.as_deref())
+        else {
+            return;
+        };
+        let next = (self.selected as isize + delta).rem_euclid(visible.len() as isize) as usize;
+        let next_key = visible[next].source_key.clone();
+        self.toggle_source(current_key);
+        if let Some(next_key) = next_key {
+            self.selected = self
+                .visible_candidates()
+                .iter()
+                .position(|candidate| candidate.source_key.as_deref() == Some(&next_key))
+                .unwrap_or(0);
+        }
+    }
+
+    fn toggle_source(&mut self, key: &str) {
         if let Some(index) = self
             .checked_sources
             .iter()
-            .position(|checked| checked == &key)
+            .position(|checked| checked == key)
         {
             self.checked_sources.remove(index);
         } else {
-            self.checked_sources.push(key);
+            self.checked_sources.push(key.into());
         }
     }
 
@@ -596,8 +690,10 @@ impl App {
             Stage::Kind => self.kind_candidates(),
             Stage::PaneSource => self.pane_source_candidates(),
             Stage::TabSource => self.tab_source_candidates(),
+            Stage::WorkspaceSource => self.workspace_source_candidates(),
             Stage::PaneDestination(source) => self.pane_destination_candidates(source),
             Stage::TabDestination(source) => self.tab_destination_candidates(source),
+            Stage::WorkspaceDestination(source) => self.workspace_destination_candidates(source),
         }
     }
 
@@ -612,6 +708,11 @@ impl App {
             .tabs
             .iter()
             .find(|tab| tab.tab_id == self.invoked_tab_id);
+        let workspace = self
+            .topology
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.workspace_id == self.invoked_workspace_id);
         vec![
             Candidate {
                 choice: Choice::Kind(MoveKind::Pane),
@@ -641,6 +742,27 @@ impl App {
                             )
                         })
                         .unwrap_or_else(|| "preserve its live split layout".into()),
+                    tone: RowTone::Normal,
+                    checked: false,
+                },
+                search: String::new(),
+                pinned: false,
+                source_key: None,
+            },
+            Candidate {
+                choice: Choice::Kind(MoveKind::Workspace),
+                row: DisplayRow {
+                    title: "Merge a workspace".into(),
+                    detail: workspace
+                        .map(|workspace| {
+                            format!(
+                                "current · {} · {} tabs · {} panes",
+                                self.workspace_name(workspace),
+                                workspace.tab_count,
+                                workspace.pane_count
+                            )
+                        })
+                        .unwrap_or_else(|| "append all of its tabs to another workspace".into()),
                     tone: RowTone::Normal,
                     checked: false,
                 },
@@ -762,6 +884,43 @@ impl App {
                     search: format!("{title} {detail}"),
                     pinned: false,
                     source_key: Some(source_key),
+                }
+            })
+            .collect()
+    }
+
+    fn workspace_source_candidates(&self) -> Vec<Candidate> {
+        let mut workspaces = self.topology.workspaces.clone();
+        workspaces.sort_by_key(|workspace| {
+            (
+                usize::from(workspace.workspace_id != self.invoked_workspace_id),
+                workspace.number,
+            )
+        });
+        workspaces
+            .into_iter()
+            .map(|workspace| {
+                let current = workspace.workspace_id == self.invoked_workspace_id;
+                let title = self.workspace_name(&workspace);
+                let detail = format!(
+                    "{} tabs · {} panes · {}",
+                    workspace.tab_count, workspace.pane_count, workspace.workspace_id
+                );
+                Candidate {
+                    choice: Choice::WorkspaceSource(workspace),
+                    row: DisplayRow {
+                        title: title.clone(),
+                        detail: detail.clone(),
+                        tone: if current {
+                            RowTone::Current
+                        } else {
+                            RowTone::Normal
+                        },
+                        checked: false,
+                    },
+                    search: format!("{title} {detail}"),
+                    pinned: false,
+                    source_key: None,
                 }
             })
             .collect()
@@ -902,6 +1061,39 @@ impl App {
             source_key: None,
         });
         candidates
+    }
+
+    fn workspace_destination_candidates(&self, source: &WorkspaceInfo) -> Vec<Candidate> {
+        let mut workspaces = self
+            .topology
+            .workspaces
+            .iter()
+            .filter(|workspace| workspace.workspace_id != source.workspace_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        workspaces.sort_by_key(|workspace| workspace.number);
+        workspaces
+            .into_iter()
+            .map(|workspace| {
+                let title = self.workspace_name(&workspace);
+                let detail = format!(
+                    "append after {} tabs · {} panes · {}",
+                    workspace.tab_count, workspace.pane_count, workspace.workspace_id
+                );
+                Candidate {
+                    choice: Choice::WorkspaceDestination(workspace),
+                    row: DisplayRow {
+                        title: title.clone(),
+                        detail: detail.clone(),
+                        tone: RowTone::Normal,
+                        checked: false,
+                    },
+                    search: format!("{title} {detail}"),
+                    pinned: false,
+                    source_key: None,
+                }
+            })
+            .collect()
     }
 
     fn pane_label(&self, pane: &PaneInfo) -> String {
@@ -1123,6 +1315,28 @@ mod tests {
     }
 
     #[test]
+    fn workspace_merge_defaults_to_the_current_workspace() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(key(KeyCode::Char('w')));
+
+        assert_eq!(app.rows()[0].title, "source");
+        assert_eq!(app.rows()[0].tone, RowTone::Current);
+
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.heading(), "Merge source into…");
+        assert_eq!(app.rows().len(), 1);
+        assert_eq!(app.rows()[0].title, "target");
+
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            InputOutcome::MergeWorkspace(MergeWorkspaceRequest {
+                source_workspace_id: "w1".into(),
+                destination_workspace_id: "w2".into(),
+            })
+        );
+    }
+
+    #[test]
     fn fuzzy_source_filter_searches_labels_and_workspace_context() {
         let mut app = App::new(topology(), "w1:p1").unwrap();
         app.handle_key(key(KeyCode::Enter));
@@ -1227,6 +1441,21 @@ mod tests {
         assert_eq!(app.rows()[0].title, "focused-pane");
         assert!(app.rows()[0].checked);
         assert_eq!(app.rows()[1].title, "api-server");
+    }
+
+    #[test]
+    fn tab_advances_in_filtered_order_after_selection_reorders() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Char('e')));
+        app.selected = 2;
+        let rows = app.rows();
+        let expected = rows[3].title.clone();
+
+        app.handle_key(key(KeyCode::Tab));
+
+        assert_eq!(app.rows()[app.selected].title, expected);
     }
 
     #[test]

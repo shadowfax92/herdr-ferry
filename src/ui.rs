@@ -201,7 +201,8 @@ mod tests {
         assert!(rendered.contains("What should cross?"));
         assert!(rendered.contains("Move a pane"));
         assert!(rendered.contains("Move a whole tab"));
-        assert!(rendered.contains("p/t shortcut"));
+        assert!(rendered.contains("Merge a workspace"));
+        assert!(rendered.contains("p/t/w shortcut"));
     }
 
     #[test]

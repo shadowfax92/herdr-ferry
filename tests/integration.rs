@@ -3,7 +3,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use herdr_ferry::app::{
-    MovePaneRequest, MoveTabRequest, PaneDestination, PaneSource, TabDestination,
+    MergeWorkspaceRequest, MovePaneRequest, MoveTabRequest, PaneDestination, PaneSource,
+    TabDestination,
 };
 use herdr_ferry::herdr::Herdr;
 use herdr_ferry::layout::SplitDirection;
@@ -215,6 +216,33 @@ fn multiple_tabs_append_to_one_new_workspace() {
         "pane move w1:p2 --tab w3:t1 --split right --target-pane w3:p1 --ratio 0.5 --no-focus"
     ));
     assert!(log.ends_with("workspace focus w3\ntab focus w3:t1\n"));
+}
+
+#[test]
+fn workspace_merge_appends_every_tab_in_source_order() {
+    let fake = FakeHerdr::new();
+    let mover = Mover::new(fake.client());
+
+    let summary = mover
+        .merge_workspace(&MergeWorkspaceRequest {
+            source_workspace_id: "w1".into(),
+            destination_workspace_id: "w2".into(),
+        })
+        .unwrap();
+
+    assert_eq!(
+        summary.message,
+        "Workspace “source” merged into “target” · 2 tabs"
+    );
+    assert_eq!(summary.moved_tabs, 2);
+    let log = fake.log();
+    let first = log
+        .find("pane move w1:p1 --new-tab --workspace w2 --label main --no-focus")
+        .unwrap();
+    let second = log
+        .find("pane move w1:p3 --new-tab --workspace w2 --label logs --no-focus")
+        .unwrap();
+    assert!(first < second);
 }
 
 #[test]
