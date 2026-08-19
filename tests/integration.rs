@@ -94,8 +94,7 @@ fn whole_tab_move_replays_the_reported_split_with_returned_pane_ids() {
 
     let summary = mover
         .move_tab(&MoveTabRequest {
-            source_tab_id: "w1:t1".into(),
-            source_pane_id: "w1:p1".into(),
+            tab_ids: vec!["w1:t1".into()],
             destination: TabDestination::Workspace {
                 workspace_id: "w2".into(),
             },
