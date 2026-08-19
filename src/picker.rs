@@ -40,7 +40,12 @@ fn run_picker(
             InputOutcome::Continue => {}
             InputOutcome::Cancel => return Ok(()),
             InputOutcome::MovePane(request) => {
-                app.set_working("Moving pane…");
+                let noun = if request.sources.len() == 1 {
+                    "pane"
+                } else {
+                    "panes"
+                };
+                app.set_working(format!("Moving {} {noun}…", request.sources.len()));
                 terminal.draw(|frame| ui::render(app, frame))?;
                 match mover.move_pane(&request) {
                     Ok(summary) => {
@@ -51,7 +56,15 @@ fn run_picker(
                 }
             }
             InputOutcome::MoveTab(request) => {
-                app.set_working("Rebuilding the tab with its live panes…");
+                let subject = if request.tab_ids.len() == 1 {
+                    "tab with its"
+                } else {
+                    "tabs with their"
+                };
+                app.set_working(format!(
+                    "Moving {} {subject} live panes…",
+                    request.tab_ids.len()
+                ));
                 terminal.draw(|frame| ui::render(app, frame))?;
                 match mover.move_tab(&request) {
                     Ok(summary) => {
