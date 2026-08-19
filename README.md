@@ -2,7 +2,7 @@
 
 # ⛴ Herdr Ferry
 
-**Move live panes and whole tabs between Herdr workspaces.**
+**Move live panes and tabs, or merge whole Herdr workspaces.**
 
 [![Herdr 0.8.0+](https://img.shields.io/badge/Herdr-0.8.0%2B-6c71c4)](https://herdr.dev)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-b7410e)](https://www.rust-lang.org/)
@@ -14,11 +14,13 @@ Ferry is a native Rust popup for the occasional move that should be deliberate b
 
 Press `prefix+m`, then make three choices:
 
-1. Move a pane or a whole tab.
-2. Accept the focused pane/current tab, or fuzzy-search every live source in the session.
+1. Move panes, move whole tabs, or merge a workspace.
+2. Accept the focused pane/current tab/current workspace, or fuzzy-search every live source.
 3. Pick the destination.
 
-Pane moves can target any existing tab, a new tab in the source workspace, or a new workspace. Whole-tab moves target another workspace or a new one. The popup stays session-modal while you choose, so it never alters the tiled layout.
+Pane and tab source screens use `fzf`-style multi-selection without depending on `fzf`: press `Space` or `Tab` to check rows and `Ctrl-a` to check every visible match. Pressing `Enter` without checking anything keeps the highlighted row as the single default.
+
+Pane moves can target any existing tab, a new tab in any workspace, or a new workspace. Whole-tab moves target another workspace or a new one. Workspace merge appends every source tab to an existing destination in tab order; Herdr removes the source workspace once its final live pane has moved. The popup stays session-modal while you choose, so it never alters the tiled layout.
 
 ## Install
 
@@ -36,7 +38,7 @@ The installer adds this conflict-checked binding to `~/.config/herdr/config.toml
 key = "prefix+m"
 type = "plugin_action"
 command = "shadowfax.ferry.open"
-description = "Move a pane or tab with Ferry"
+description = "Move panes or tabs, or merge workspaces with Ferry"
 ```
 
 It preserves unrelated configuration, is idempotent, and refuses to replace an occupied built-in or custom key.
@@ -52,10 +54,13 @@ herdr plugin link . --enabled
 
 | Key | Action |
 | --- | --- |
-| `p` / `t` | Choose pane or tab on the first screen |
+| `p` / `t` / `w` | Choose panes, tabs, or workspace merge on the first screen |
 | Type | Fuzzy-filter sources or destinations |
 | `Up` / `Down` | Navigate results |
-| `Enter` | Choose; existing pane destinations split right |
+| `Space` / `Tab` | Toggle a pane or tab source and advance |
+| `Shift-Tab` | Toggle a pane or tab source and move back |
+| `Ctrl-a` | Toggle all visible pane or tab sources |
+| `Enter` | Continue with checked rows, or use the highlighted row by itself |
 | `Alt-d` | Move a pane into an existing tab with a down split |
 | `Esc` | Go back one screen, then close |
 | `Ctrl-c` | Close immediately |
@@ -68,7 +73,13 @@ Herdr exposes live pane moves but no atomic cross-workspace tab move. Ferry read
 
 Pane processes, shells, scrollback, and running agents are relocated rather than restarted. Cross-workspace pane IDs can change; Ferry follows the IDs returned by each move before placing the next pane.
 
-A whole-tab move is necessarily a short sequence of server operations. If one fails after the first pane moved, Ferry leaves every process alive and reports exactly how many panes reached the destination; it does not attempt a risky automatic rollback.
+A whole-tab move is necessarily a short sequence of server operations. Ferry preflights every selected tab before moving the first pane. If a later operation fails, Ferry leaves every process alive and reports exactly how many complete tabs and panes reached the destination; it does not attempt a risky automatic rollback.
+
+## Workspace merge and named sessions
+
+Ferry merges workspaces inside the current Herdr session. It preserves each tab as a tab, appends them in source order, and uses the same layout-preserving batch engine described above.
+
+Herdr named sessions are separate server processes and Herdr 0.8 has no cross-session pane-transfer command. Ferry therefore does not claim to merge named sessions; that would require a transfer primitive in Herdr itself.
 
 ## Development
 

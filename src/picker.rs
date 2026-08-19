@@ -74,6 +74,17 @@ fn run_picker(
                     Err(error) => app.set_failure(format!("{error:#}")),
                 }
             }
+            InputOutcome::MergeWorkspace(request) => {
+                app.set_working("Appending every source tab to the destination…");
+                terminal.draw(|frame| ui::render(app, frame))?;
+                match mover.merge_workspace(&request) {
+                    Ok(summary) => {
+                        let _ = herdr.notify(&summary.message);
+                        return Ok(());
+                    }
+                    Err(error) => app.set_failure(format!("{error:#}")),
+                }
+            }
         }
     }
 }

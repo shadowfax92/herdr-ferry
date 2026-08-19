@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::app::{MovePaneRequest, MoveTabRequest, PaneDestination, TabDestination};
+use crate::app::{
+    MergeWorkspaceRequest, MovePaneRequest, MoveTabRequest, PaneDestination, TabDestination,
+};
 use crate::herdr::{Herdr, MovedPane, Topology};
 use crate::layout::LayoutNode;
 
@@ -234,6 +236,51 @@ impl Mover {
         })
     }
 
+    pub fn merge_workspace(&self, request: &MergeWorkspaceRequest) -> Result<MoveSummary> {
+        if request.source_workspace_id == request.destination_workspace_id {
+            bail!("a workspace cannot merge into itself");
+        }
+        let topology = self.herdr.topology()?;
+        let source = topology
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.workspace_id == request.source_workspace_id)
+            .context("the source workspace no longer exists")?;
+        let destination = topology
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.workspace_id == request.destination_workspace_id)
+            .context("the destination workspace no longer exists")?;
+        let mut tabs = topology
+            .tabs
+            .iter()
+            .filter(|tab| tab.workspace_id == source.workspace_id)
+            .collect::<Vec<_>>();
+        tabs.sort_by_key(|tab| tab.number);
+        if tabs.is_empty() {
+            bail!("the source workspace has no tabs to merge");
+        }
+        let source_name = workspace_name(&source.label, &source.workspace_id);
+        let destination_name = workspace_name(&destination.label, &destination.workspace_id);
+        let tab_ids = tabs.iter().map(|tab| tab.tab_id.clone()).collect();
+        let mut summary = self.move_tab(&MoveTabRequest {
+            tab_ids,
+            destination: TabDestination::Workspace {
+                workspace_id: destination.workspace_id.clone(),
+            },
+        })?;
+        summary.message = format!(
+            "Workspace “{source_name}” merged into “{destination_name}” · {} {}",
+            summary.moved_tabs,
+            if summary.moved_tabs == 1 {
+                "tab"
+            } else {
+                "tabs"
+            }
+        );
+        Ok(summary)
+    }
+
     fn prepare_pane_move(&self, request: &MovePaneRequest) -> Result<()> {
         if request.sources.is_empty() {
             bail!("select at least one pane");
@@ -429,6 +476,15 @@ fn tab_label(label: &str) -> String {
     let label = label.trim();
     if label.is_empty() {
         "moved".into()
+    } else {
+        label.into()
+    }
+}
+
+fn workspace_name(label: &str, workspace_id: &str) -> String {
+    let label = label.trim();
+    if label.is_empty() {
+        workspace_id.into()
     } else {
         label.into()
     }
