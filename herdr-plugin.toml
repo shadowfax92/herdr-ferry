@@ -3,7 +3,7 @@ name = "Herdr Ferry"
 version = "0.2.0"
 min_herdr_version = "0.8.0"
 description = "Move live panes and tabs or merge workspaces from a native popup."
-platforms = ["macos"]
+platforms = ["macos", "linux"]
 
 [[build]]
 command = ["cargo", "build", "--release", "--locked"]

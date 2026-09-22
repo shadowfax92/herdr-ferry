@@ -24,7 +24,9 @@ Pane moves can target any existing tab, a new tab in any workspace, or a new wor
 
 ## Install
 
-Requires macOS, Herdr 0.8.0 or newer, and a Rust toolchain. Install and enable Ferry, then add its conflict-checked keybinding:
+Requires macOS or Linux (including WSL), Herdr 0.8.0 or newer, and a Rust toolchain. Install and enable Ferry, then add its conflict-checked keybinding:
+
+On Windows, run Herdr and this plugin inside WSL. Native Windows is not supported.
 
 ```sh
 herdr plugin install shadowfax92/herdr-ferry --yes
