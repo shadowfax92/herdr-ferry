@@ -2,6 +2,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 pub mod app;
+pub mod close_ops;
+pub mod close_plan;
 pub mod fuzzy;
 pub mod herdr;
 pub mod keybindings;

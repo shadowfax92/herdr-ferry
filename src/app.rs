@@ -1251,6 +1251,7 @@ mod tests {
             ],
             panes: vec![
                 PaneInfo {
+                    terminal_id: None,
                     pane_id: "w1:p1".into(),
                     tab_id: "w1:t1".into(),
                     workspace_id: "w1".into(),
@@ -1262,6 +1263,7 @@ mod tests {
                     focused: true,
                 },
                 PaneInfo {
+                    terminal_id: None,
                     pane_id: "w1:p2".into(),
                     tab_id: "w1:t1".into(),
                     workspace_id: "w1".into(),
@@ -1273,6 +1275,7 @@ mod tests {
                     focused: false,
                 },
                 PaneInfo {
+                    terminal_id: None,
                     pane_id: "w1:p3".into(),
                     tab_id: "w1:t2".into(),
                     workspace_id: "w1".into(),
@@ -1284,6 +1287,7 @@ mod tests {
                     focused: false,
                 },
                 PaneInfo {
+                    terminal_id: None,
                     pane_id: "w2:p1".into(),
                     tab_id: "w2:t1".into(),
                     workspace_id: "w2".into(),

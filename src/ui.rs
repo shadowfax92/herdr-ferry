@@ -165,6 +165,7 @@ mod tests {
                     focused: true,
                 }],
                 panes: vec![PaneInfo {
+                    terminal_id: None,
                     pane_id: "w1:p1".into(),
                     tab_id: "w1:t1".into(),
                     workspace_id: "w1".into(),

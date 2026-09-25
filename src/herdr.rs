@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::layout::{LayoutSnapshot, SplitDirection};
 use crate::PLUGIN_ID;
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct WorkspaceInfo {
     pub workspace_id: String,
     #[serde(default)]
@@ -23,7 +23,7 @@ pub struct WorkspaceInfo {
     pub focused: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TabInfo {
     pub tab_id: String,
     pub workspace_id: String,
@@ -37,8 +37,10 @@ pub struct TabInfo {
     pub focused: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PaneInfo {
+    #[serde(default)]
+    pub terminal_id: Option<String>,
     pub pane_id: String,
     pub tab_id: String,
     pub workspace_id: String,
@@ -70,7 +72,7 @@ pub struct MovedPane {
     pub workspace_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct InvocationContext {
     pub focused_pane_id: Option<String>,
 }
