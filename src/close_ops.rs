@@ -3,9 +3,10 @@
 //! closure stays a failure, not permission to broaden the target set.
 use std::collections::BTreeSet;
 
+use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::close_plan::{CloseBackend, ClosePlan};
+use crate::close_plan::{CloseBackend, CloseKind, ClosePlan};
 use crate::herdr::PaneInfo;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -36,6 +37,18 @@ impl CloseReport {
 pub fn execute(backend: &impl CloseBackend, plan: &ClosePlan) -> CloseReport {
     let mut report = CloseReport::default();
     let mut completed = BTreeSet::new();
+    if plan.kind == CloseKind::Clear {
+        match prepare_keeper(backend, plan) {
+            Ok(keeper) => report.keeper = keeper,
+            Err(error) => {
+                report.failed = plan.panes.len();
+                report.errors.push(format!(
+                    "Clear stopped before closing any old terminals: {error:#}"
+                ));
+                return report;
+            }
+        }
+    }
     let mut panes = plan.panes.iter().collect::<Vec<_>>();
     // Tab first, then pane: the source terminal is always the final mutation,
     // although the server-owned worker does not depend on that terminal living.
@@ -85,4 +98,41 @@ pub fn execute(backend: &impl CloseBackend, plan: &ClosePlan) -> CloseReport {
         completed.insert(reviewed.pane.pane_id.clone());
     }
     report
+}
+
+/// Creation is the only permitted expansion: a fresh, verified shell in the
+/// same workspace. Old tabs were frozen at review; new concurrent tabs never
+/// enter the close set, and no failure path removes the keeper.
+fn prepare_keeper(backend: &impl CloseBackend, plan: &ClosePlan) -> Result<Option<PaneInfo>> {
+    let topology = plan.validate(backend, &BTreeSet::new(), None)?;
+    if !plan
+        .panes
+        .iter()
+        .any(|old| topology.panes.iter().any(|p| p.pane_id == old.pane.pane_id))
+    {
+        return Ok(None);
+    }
+    let workspace = plan.clear_workspace()?;
+    let keeper = backend.create_keeper(
+        &workspace.workspace_id,
+        plan.keeper_cwd.as_deref().unwrap_or(""),
+    )?;
+    ensure!(
+        keeper.workspace_id == workspace.workspace_id
+            && keeper
+                .terminal_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty())
+            && !plan.tabs.iter().any(|t| t.tab_id == keeper.tab_id)
+            && !plan
+                .panes
+                .iter()
+                .any(|p| p.pane.pane_id == keeper.pane_id
+                    || p.pane.terminal_id == keeper.terminal_id),
+        "Herdr did not return a fresh keeper in the selected workspace"
+    );
+    // A creation acknowledgement alone is insufficient: verify it is still
+    // live before the first close, then on every subsequent mutation.
+    plan.validate(backend, &BTreeSet::new(), Some(&keeper))?;
+    Ok(Some(keeper))
 }

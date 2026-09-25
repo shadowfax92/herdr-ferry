@@ -11,6 +11,7 @@ struct Memory {
     processes: RefCell<BTreeMap<String, ProcessInfo>>,
     closed: RefCell<Vec<String>>,
     fail: Option<String>,
+    keeper_available: bool,
 }
 
 impl Memory {
@@ -51,6 +52,7 @@ impl Memory {
             ),
             closed: RefCell::new(vec![]),
             fail: None,
+            keeper_available: false,
         }
     }
 
@@ -93,8 +95,20 @@ impl CloseBackend for Memory {
             .retain(|w| workspaces.contains(&w.workspace_id));
         Ok(())
     }
-    fn create_keeper(&self, _: &str, _: &str) -> Result<PaneInfo> {
-        bail!("keeper unavailable")
+    fn create_keeper(&self, workspace: &str, cwd: &str) -> Result<PaneInfo> {
+        if !self.keeper_available {
+            bail!("keeper unavailable");
+        }
+        let pane: PaneInfo = serde_json::from_value(serde_json::json!({"pane_id":"w1:p9","tab_id":"w1:t9","workspace_id":workspace,"terminal_id":"keeper-terminal","cwd":cwd})).unwrap();
+        let mut t = self.topology.borrow_mut();
+        t.panes.push(pane.clone());
+        t.tabs.push(
+            serde_json::from_value(
+                serde_json::json!({"tab_id":"w1:t9","workspace_id":workspace,"label":"shell"}),
+            )
+            .unwrap(),
+        );
+        Ok(pane)
     }
 }
 
@@ -195,4 +209,93 @@ fn tests_that_empty_or_unknown_selection_is_rejected() {
         )
         .is_err());
     }
+}
+
+#[test]
+fn tests_that_clear_retains_workspace_and_new_shell_with_reviewed_cwd() {
+    let mut backend = Memory::new();
+    backend.keeper_available = true;
+    let plan = backend.plan(CloseKind::Clear, &["w1"]);
+    let report = execute(&backend, &plan);
+    assert_eq!((report.completed, report.failed), (2, 0));
+    assert_eq!(report.keeper.as_ref().unwrap().cwd.as_deref(), Some("/tmp"));
+    let t = backend.topology.borrow();
+    assert!(t.workspaces.iter().any(|w| w.workspace_id == "w1"));
+    assert_eq!(t.panes.iter().filter(|p| p.workspace_id == "w1").count(), 1);
+    assert_eq!(
+        t.panes
+            .iter()
+            .find(|p| p.workspace_id == "w1")
+            .unwrap()
+            .terminal_id
+            .as_deref(),
+        Some("keeper-terminal")
+    );
+}
+
+#[test]
+fn tests_that_failed_keeper_creation_preserves_every_old_terminal() {
+    let backend = Memory::new();
+    let report = execute(&backend, &backend.plan(CloseKind::Clear, &["w1"]));
+    assert_eq!((report.completed, report.failed), (0, 2));
+    assert!(report.errors.join(" ").contains("keeper unavailable"));
+    assert!(backend.closed.borrow().is_empty());
+}
+
+#[test]
+fn tests_that_clear_keeps_new_concurrent_tabs_outside_the_snapshot() {
+    let mut backend = Memory::new();
+    backend.keeper_available = true;
+    let plan = backend.plan(CloseKind::Clear, &["w1"]);
+    let pane: PaneInfo = serde_json::from_value(serde_json::json!({"pane_id":"w1:p8","tab_id":"w1:t8","workspace_id":"w1","terminal_id":"concurrent"})).unwrap();
+    backend.topology.borrow_mut().panes.push(pane);
+    backend.topology.borrow_mut().tabs.push(
+        serde_json::from_value(serde_json::json!({"tab_id":"w1:t8","workspace_id":"w1"})).unwrap(),
+    );
+    let report = execute(&backend, &plan);
+    assert_eq!((report.completed, report.failed), (2, 0));
+    assert!(report.keeper.is_some());
+    assert!(backend
+        .topology
+        .borrow()
+        .panes
+        .iter()
+        .any(|p| p.terminal_id.as_deref() == Some("concurrent")));
+}
+
+#[test]
+fn tests_that_partial_clear_preserves_keeper_and_reports_failure() {
+    let mut backend = Memory::new();
+    backend.keeper_available = true;
+    backend.fail = Some("w1:p1".into());
+    let report = execute(&backend, &backend.plan(CloseKind::Clear, &["w1"]));
+    assert_eq!((report.completed, report.failed), (1, 1));
+    let keeper = report.keeper.unwrap();
+    assert!(backend
+        .topology
+        .borrow()
+        .panes
+        .iter()
+        .any(|p| p.pane_id == keeper.pane_id));
+}
+
+#[test]
+fn tests_that_noop_clear_does_not_create_an_extra_keeper() {
+    let mut backend = Memory::new();
+    backend.keeper_available = true;
+    let plan = backend.plan(CloseKind::Clear, &["w1"]);
+    execute(&backend, &plan);
+    let report = execute(&backend, &plan);
+    assert_eq!((report.completed, report.skipped, report.failed), (0, 2, 0));
+    assert!(report.keeper.is_none());
+    assert_eq!(
+        backend
+            .topology
+            .borrow()
+            .panes
+            .iter()
+            .filter(|p| p.workspace_id == "w1")
+            .count(),
+        1
+    );
 }
