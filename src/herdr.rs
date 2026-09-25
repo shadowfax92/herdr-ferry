@@ -231,6 +231,16 @@ impl Herdr {
         Ok(())
     }
 
+    pub fn start_close_worker(&self) -> Result<()> {
+        self.output([
+            "plugin",
+            "action",
+            "invoke",
+            "shadowfax.ferry.execute-close",
+        ])?;
+        Ok(())
+    }
+
     pub fn reload_config(&self) -> Result<()> {
         self.output(["server", "reload-config"])?;
         Ok(())
@@ -373,6 +383,58 @@ struct RawMoveResult {
     #[serde(default)]
     reason: Option<String>,
     pane: PaneInfo,
+}
+
+/// Destructive commands discard inherited caller aliases: only the canonical
+/// identity from the reviewed live topology is allowed to resolve here.
+impl crate::close_plan::CloseBackend for Herdr {
+    fn topology(&self) -> Result<Topology> {
+        self.topology()
+    }
+
+    fn process_info(&self, pane_id: &str) -> Result<crate::close_plan::ProcessInfo> {
+        #[derive(Deserialize)]
+        struct ProcessResult {
+            process_info: crate::close_plan::ProcessInfo,
+        }
+        let response: Envelope<ProcessResult> =
+            self.json(["pane", "process-info", "--pane", pane_id])?;
+        Ok(response.result.process_info)
+    }
+
+    fn close_pane(&self, pane_id: &str) -> Result<()> {
+        let output = Command::new(&self.binary)
+            .args(["pane", "close", pane_id])
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_TERMINAL_ID")
+            .output()?;
+        if !output.status.success() {
+            bail!(
+                "Herdr close failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    fn create_keeper(&self, workspace_id: &str, cwd: &str) -> Result<PaneInfo> {
+        #[derive(Deserialize)]
+        struct CreatedTab {
+            root_pane: PaneInfo,
+        }
+        let response: Envelope<CreatedTab> = self.json([
+            "tab",
+            "create",
+            "--workspace",
+            workspace_id,
+            "--cwd",
+            cwd,
+            "--label",
+            "shell",
+            "--no-focus",
+        ])?;
+        Ok(response.result.root_pane)
+    }
 }
 
 #[cfg(test)]

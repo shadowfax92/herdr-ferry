@@ -28,3 +28,10 @@ placement = "popup"
 width = 76
 height = 24
 command = ["./target/release/herdr-ferry", "picker"]
+
+# Server-owned executor consumes only private, confirmed, session-scoped jobs.
+[[actions]]
+id = "execute-close"
+title = "Execute confirmed Ferry closures"
+description = "Internal worker; without a confirmed request this does nothing."
+command = ["./target/release/herdr-ferry", "close-worker"]

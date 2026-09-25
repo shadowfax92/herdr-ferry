@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 pub mod app;
 pub mod close_ops;
 pub mod close_plan;
+pub mod close_worker;
 pub mod fuzzy;
 pub mod herdr;
 pub mod keybindings;
@@ -25,6 +26,8 @@ pub struct Cli {
 pub enum Command {
     Open,
     Picker,
+    #[command(hide = true)]
+    CloseWorker,
     InstallKeybindings,
 }
 
@@ -32,6 +35,7 @@ pub fn run(command: Command) -> Result<()> {
     match command {
         Command::Open => herdr::launch_from_environment(),
         Command::Picker => picker::run_from_environment(),
+        Command::CloseWorker => close_worker::run_from_environment(),
         Command::InstallKeybindings => {
             keybindings::install_from_environment()?;
             Ok(())
