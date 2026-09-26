@@ -231,6 +231,34 @@ impl Herdr {
         Ok(())
     }
 
+    pub fn launch_close_picker(&self, source: &str, entry: crate::close_app::Entry) -> Result<()> {
+        let source = format!("HERDR_FERRY_SOURCE_PANE_ID={source}");
+        let entry = match entry {
+            crate::close_app::Entry::Close => "HERDR_FERRY_ENTRY=close",
+            crate::close_app::Entry::ClearFt => "HERDR_FERRY_ENTRY=clear-ft",
+        };
+        self.output([
+            "plugin",
+            "pane",
+            "open",
+            "--plugin",
+            PLUGIN_ID,
+            "--entrypoint",
+            "close-picker",
+            "--placement",
+            "popup",
+            "--width",
+            "90",
+            "--height",
+            "28",
+            "--env",
+            &source,
+            "--env",
+            entry,
+        ])?;
+        Ok(())
+    }
+
     pub fn start_close_worker(&self) -> Result<()> {
         self.output([
             "plugin",
