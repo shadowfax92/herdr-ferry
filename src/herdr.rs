@@ -3,13 +3,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::layout::{LayoutSnapshot, SplitDirection};
 use crate::PLUGIN_ID;
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct WorkspaceInfo {
+    #[serde(default)]
+    pub worktree: Option<WorkspaceWorktree>,
     pub workspace_id: String,
     #[serde(default)]
     pub label: String,
@@ -23,7 +25,15 @@ pub struct WorkspaceInfo {
     pub focused: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+/// Herdr may cascade root workspace closure to its linked worktree group.
+/// Ferry needs this relationship even when Herdr's own confirmation is off.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkspaceWorktree {
+    pub repo_key: String,
+    pub is_linked_worktree: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TabInfo {
     pub tab_id: String,
     pub workspace_id: String,
@@ -37,8 +47,10 @@ pub struct TabInfo {
     pub focused: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PaneInfo {
+    #[serde(default)]
+    pub terminal_id: Option<String>,
     pub pane_id: String,
     pub tab_id: String,
     pub workspace_id: String,
@@ -70,7 +82,7 @@ pub struct MovedPane {
     pub workspace_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct InvocationContext {
     pub focused_pane_id: Option<String>,
 }
@@ -229,6 +241,55 @@ impl Herdr {
         Ok(())
     }
 
+    pub fn launch_close_picker(
+        &self,
+        source: &str,
+        terminal_id: Option<&str>,
+        entry: crate::close_app::Entry,
+    ) -> Result<()> {
+        let source = format!("HERDR_FERRY_SOURCE_PANE_ID={source}");
+        let terminal = format!(
+            "HERDR_FERRY_SOURCE_TERMINAL_ID={}",
+            terminal_id.unwrap_or("")
+        );
+        let entry = match entry {
+            crate::close_app::Entry::Close => "HERDR_FERRY_ENTRY=close",
+            crate::close_app::Entry::ClearFt => "HERDR_FERRY_ENTRY=clear-ft",
+        };
+        self.output([
+            "plugin",
+            "pane",
+            "open",
+            "--plugin",
+            PLUGIN_ID,
+            "--entrypoint",
+            "close-picker",
+            "--placement",
+            "popup",
+            "--width",
+            "90",
+            "--height",
+            "28",
+            "--env",
+            &source,
+            "--env",
+            entry,
+            "--env",
+            &terminal,
+        ])?;
+        Ok(())
+    }
+
+    pub fn start_close_worker(&self) -> Result<()> {
+        self.output([
+            "plugin",
+            "action",
+            "invoke",
+            "shadowfax.ferry.execute-close",
+        ])?;
+        Ok(())
+    }
+
     pub fn reload_config(&self) -> Result<()> {
         self.output(["server", "reload-config"])?;
         Ok(())
@@ -371,6 +432,58 @@ struct RawMoveResult {
     #[serde(default)]
     reason: Option<String>,
     pane: PaneInfo,
+}
+
+/// Destructive commands discard inherited caller aliases: only the canonical
+/// identity from the reviewed live topology is allowed to resolve here.
+impl crate::close_plan::CloseBackend for Herdr {
+    fn topology(&self) -> Result<Topology> {
+        self.topology()
+    }
+
+    fn process_info(&self, pane_id: &str) -> Result<crate::close_plan::ProcessInfo> {
+        #[derive(Deserialize)]
+        struct ProcessResult {
+            process_info: crate::close_plan::ProcessInfo,
+        }
+        let response: Envelope<ProcessResult> =
+            self.json(["pane", "process-info", "--pane", pane_id])?;
+        Ok(response.result.process_info)
+    }
+
+    fn close_pane(&self, pane_id: &str) -> Result<()> {
+        let output = Command::new(&self.binary)
+            .args(["pane", "close", pane_id])
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_TERMINAL_ID")
+            .output()?;
+        if !output.status.success() {
+            bail!(
+                "Herdr close failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    fn create_keeper(&self, workspace_id: &str, cwd: &str) -> Result<PaneInfo> {
+        #[derive(Deserialize)]
+        struct CreatedTab {
+            root_pane: PaneInfo,
+        }
+        let response: Envelope<CreatedTab> = self.json([
+            "tab",
+            "create",
+            "--workspace",
+            workspace_id,
+            "--cwd",
+            cwd,
+            "--label",
+            "shell",
+            "--no-focus",
+        ])?;
+        Ok(response.result.root_pane)
+    }
 }
 
 #[cfg(test)]

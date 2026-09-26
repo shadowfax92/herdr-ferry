@@ -149,6 +149,7 @@ mod tests {
         App::new(
             Topology {
                 workspaces: vec![WorkspaceInfo {
+                    worktree: None,
                     workspace_id: "w1".into(),
                     label: "source".into(),
                     number: 1,
@@ -165,6 +166,7 @@ mod tests {
                     focused: true,
                 }],
                 panes: vec![PaneInfo {
+                    terminal_id: None,
                     pane_id: "w1:p1".into(),
                     tab_id: "w1:t1".into(),
                     workspace_id: "w1".into(),

@@ -28,3 +28,32 @@ placement = "popup"
 width = 76
 height = 24
 command = ["./target/release/herdr-ferry", "picker"]
+
+# Server-owned executor consumes only private, confirmed, session-scoped jobs.
+[[actions]]
+id = "execute-close"
+title = "Execute confirmed Ferry closures"
+description = "Internal worker; without a confirmed request this does nothing."
+command = ["./target/release/herdr-ferry", "close-worker"]
+
+[[actions]]
+id = "open-close"
+title = "Close / Clear…"
+description = "Select, review and explicitly confirm closing panes, tabs or workspaces, or clearing a workspace."
+contexts = ["pane"]
+command = ["./target/release/herdr-ferry", "open-close"]
+
+[[actions]]
+id = "clear-ft"
+title = "Clear ft…"
+description = "Review and clear one ft workspace in the current session, keeping a fresh shell."
+contexts = ["pane"]
+command = ["./target/release/herdr-ferry", "clear-ft"]
+
+[[panes]]
+id = "close-picker"
+title = "Ferry Close / Clear"
+placement = "popup"
+width = 90
+height = 28
+command = ["./target/release/herdr-ferry", "close-picker"]
