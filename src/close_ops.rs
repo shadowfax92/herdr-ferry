@@ -26,7 +26,7 @@ impl CloseReport {
             self.skipped,
             self.failed,
             if self.keeper.is_some() {
-                "; keeper shell preserved"
+                "; keeper created (see report)"
             } else {
                 ""
             }
@@ -131,8 +131,8 @@ fn prepare_keeper(backend: &impl CloseBackend, plan: &ClosePlan) -> Result<Optio
                     || p.pane.terminal_id == keeper.terminal_id),
         "Herdr did not return a fresh keeper in the selected workspace"
     );
-    // A creation acknowledgement alone is insufficient: verify it is still
-    // live before the first close, then on every subsequent mutation.
-    plan.validate(backend, &BTreeSet::new(), Some(&keeper))?;
+    // Return the created identity even if an external actor removes it next.
+    // The execution loop verifies it before the first and every later close;
+    // reporting must retain this identity if that validation fails.
     Ok(Some(keeper))
 }

@@ -149,11 +149,16 @@ impl ClosePlan {
             .filter(|w| selected.iter().any(|p| p.workspace_id == w.workspace_id))
             .cloned()
             .collect::<Vec<_>>();
-        let caller_tab_id = topology
+        // The popup carries the source terminal identity across pane moves.
+        // Its inherited pane ID can be stale by the time review is requested.
+        let caller_pane = topology
             .panes
             .iter()
-            .find(|p| p.pane_id == caller)
-            .map(|p| p.tab_id.clone());
+            .find(|p| p.pane_id == caller || p.terminal_id.as_deref() == Some(caller));
+        let caller_tab_id = caller_pane.map(|p| p.tab_id.clone());
+        let caller_pane_id = caller_pane
+            .map(|p| p.pane_id.clone())
+            .unwrap_or_else(|| caller.into());
         let keeper_cwd = (request.kind == CloseKind::Clear).then(|| {
             selected
                 .first()
@@ -188,7 +193,7 @@ impl ClosePlan {
             panes,
             tabs,
             workspaces,
-            caller_pane_id: caller.into(),
+            caller_pane_id,
             caller_tab_id,
             keeper_cwd,
         };
@@ -258,6 +263,35 @@ impl ClosePlan {
                         tab.workspace_id
                     );
                 }
+            }
+        }
+        // Herdr's implicit last-pane close can cascade to linked worktrees
+        // when its confirm_close setting is off. Never delegate authorization
+        // to that setting: reject a root's full closure while siblings exist.
+        if self.kind != CloseKind::Clear {
+            for workspace in &topology.workspaces {
+                let Some(group) = &workspace.worktree else {
+                    continue;
+                };
+                if group.is_linked_worktree {
+                    continue;
+                }
+                let live = topology
+                    .panes
+                    .iter()
+                    .filter(|p| p.workspace_id == workspace.workspace_id)
+                    .collect::<Vec<_>>();
+                let closes_root = !live.is_empty()
+                    && live
+                        .iter()
+                        .all(|p| self.panes.iter().any(|old| old.pane.pane_id == p.pane_id));
+                let has_siblings = topology.workspaces.iter().any(|w| {
+                    w.workspace_id != workspace.workspace_id
+                        && w.worktree
+                            .as_ref()
+                            .is_some_and(|member| member.repo_key == group.repo_key)
+                });
+                ensure!(!(closes_root && has_siblings), "Closing {} could close linked worktree workspaces. Close linked workspaces first, or use Clear; no group closure was authorized", workspace.workspace_id);
             }
         }
         if let Some(keeper) = keeper {

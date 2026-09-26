@@ -289,14 +289,15 @@ fn tests_that_close_entrypoints_open_the_separate_native_picker() {
     use herdr_ferry::close_app::Entry;
     let fake = FakeHerdr::new();
     fake.client()
-        .launch_close_picker("w1:p1", Entry::Close)
+        .launch_close_picker("w1:p1", Some("term-source"), Entry::Close)
         .unwrap();
     fake.client()
-        .launch_close_picker("w1:p1", Entry::ClearFt)
+        .launch_close_picker("w1:p1", Some("term-source"), Entry::ClearFt)
         .unwrap();
     let log = fake.log();
     assert!(log.contains("--entrypoint close-picker"));
     assert!(log.contains("HERDR_FERRY_ENTRY=close"));
     assert!(log.contains("HERDR_FERRY_ENTRY=clear-ft"));
+    assert!(log.contains("HERDR_FERRY_SOURCE_TERMINAL_ID=term-source"));
     assert!(log.contains("HERDR_FERRY_SOURCE_PANE_ID=w1:p1"));
 }

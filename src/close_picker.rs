@@ -24,7 +24,7 @@ pub fn launch(entry: Entry) -> Result<()> {
         // Resolve inherited/aliased IDs once, then store only live canonical
         // source context. Targets themselves always come from fresh topology.
         let source = herdr.pane(context.source_pane_id()?)?;
-        herdr.launch_close_picker(&source.pane_id, entry)
+        herdr.launch_close_picker(&source.pane_id, source.terminal_id.as_deref(), entry)
     })();
     if let Err(error) = &result {
         let _ = herdr.notify(&format!("Could not open Close/Clear: {error:#}"));
@@ -40,8 +40,11 @@ pub fn run_from_environment() -> Result<()> {
         } else {
             Entry::Close
         };
-        let source =
-            std::env::var("HERDR_FERRY_SOURCE_PANE_ID").context("Ferry source pane is missing")?;
+        let source = std::env::var("HERDR_FERRY_SOURCE_TERMINAL_ID")
+            .ok()
+            .filter(|id| !id.is_empty())
+            .or_else(|| std::env::var("HERDR_FERRY_SOURCE_PANE_ID").ok())
+            .context("Ferry source identity is missing")?;
         let home = std::env::var("HOME").context("HOME is missing")?;
         let mut app = CloseApp::new(herdr.topology()?, entry)?;
         if let Some(request) = app.initial_request() {

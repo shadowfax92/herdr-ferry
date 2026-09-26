@@ -1207,6 +1207,7 @@ mod tests {
         Topology {
             workspaces: vec![
                 WorkspaceInfo {
+                    worktree: None,
                     workspace_id: "w1".into(),
                     label: "source".into(),
                     number: 1,
@@ -1215,6 +1216,7 @@ mod tests {
                     focused: true,
                 },
                 WorkspaceInfo {
+                    worktree: None,
                     workspace_id: "w2".into(),
                     label: "target".into(),
                     number: 2,

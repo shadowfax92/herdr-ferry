@@ -10,6 +10,8 @@ use crate::PLUGIN_ID;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct WorkspaceInfo {
+    #[serde(default)]
+    pub worktree: Option<WorkspaceWorktree>,
     pub workspace_id: String,
     #[serde(default)]
     pub label: String,
@@ -21,6 +23,14 @@ pub struct WorkspaceInfo {
     pub pane_count: usize,
     #[serde(default)]
     pub focused: bool,
+}
+
+/// Herdr may cascade root workspace closure to its linked worktree group.
+/// Ferry needs this relationship even when Herdr's own confirmation is off.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkspaceWorktree {
+    pub repo_key: String,
+    pub is_linked_worktree: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -231,8 +241,17 @@ impl Herdr {
         Ok(())
     }
 
-    pub fn launch_close_picker(&self, source: &str, entry: crate::close_app::Entry) -> Result<()> {
+    pub fn launch_close_picker(
+        &self,
+        source: &str,
+        terminal_id: Option<&str>,
+        entry: crate::close_app::Entry,
+    ) -> Result<()> {
         let source = format!("HERDR_FERRY_SOURCE_PANE_ID={source}");
+        let terminal = format!(
+            "HERDR_FERRY_SOURCE_TERMINAL_ID={}",
+            terminal_id.unwrap_or("")
+        );
         let entry = match entry {
             crate::close_app::Entry::Close => "HERDR_FERRY_ENTRY=close",
             crate::close_app::Entry::ClearFt => "HERDR_FERRY_ENTRY=clear-ft",
@@ -255,6 +274,8 @@ impl Herdr {
             &source,
             "--env",
             entry,
+            "--env",
+            &terminal,
         ])?;
         Ok(())
     }

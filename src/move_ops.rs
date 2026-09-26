@@ -522,6 +522,7 @@ mod tests {
     fn topology() -> Topology {
         Topology {
             workspaces: vec![WorkspaceInfo {
+                worktree: None,
                 workspace_id: "w1".into(),
                 label: "one".into(),
                 number: 1,

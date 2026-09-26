@@ -149,6 +149,7 @@ mod tests {
         App::new(
             Topology {
                 workspaces: vec![WorkspaceInfo {
+                    worktree: None,
                     workspace_id: "w1".into(),
                     label: "source".into(),
                     number: 1,

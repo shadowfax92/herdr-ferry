@@ -12,6 +12,8 @@ struct Memory {
     closed: RefCell<Vec<String>>,
     fail: Option<String>,
     keeper_available: bool,
+    keeper_disappears: bool,
+    after_close: Option<fn(&mut Topology)>,
 }
 
 impl Memory {
@@ -53,6 +55,8 @@ impl Memory {
             closed: RefCell::new(vec![]),
             fail: None,
             keeper_available: false,
+            keeper_disappears: false,
+            after_close: None,
         }
     }
 
@@ -93,6 +97,9 @@ impl CloseBackend for Memory {
         let workspaces: Vec<_> = t.panes.iter().map(|p| p.workspace_id.clone()).collect();
         t.workspaces
             .retain(|w| workspaces.contains(&w.workspace_id));
+        if let Some(change) = self.after_close {
+            change(&mut t);
+        }
         Ok(())
     }
     fn create_keeper(&self, workspace: &str, cwd: &str) -> Result<PaneInfo> {
@@ -100,6 +107,9 @@ impl CloseBackend for Memory {
             bail!("keeper unavailable");
         }
         let pane: PaneInfo = serde_json::from_value(serde_json::json!({"pane_id":"w1:p9","tab_id":"w1:t9","workspace_id":workspace,"terminal_id":"keeper-terminal","cwd":cwd})).unwrap();
+        if self.keeper_disappears {
+            return Ok(pane);
+        }
         let mut t = self.topology.borrow_mut();
         t.panes.push(pane.clone());
         t.tabs.push(
@@ -298,4 +308,87 @@ fn tests_that_noop_clear_does_not_create_an_extra_keeper() {
             .count(),
         1
     );
+}
+
+#[test]
+fn tests_that_terminal_identity_resolves_a_stale_caller_before_review() {
+    let backend = Memory::new();
+    backend.topology.borrow_mut().panes[0].pane_id = "w1:p9".into();
+    let mut process = backend.processes.borrow_mut().remove("w1:p1").unwrap();
+    process.pane_id = "w1:p9".into();
+    backend
+        .processes
+        .borrow_mut()
+        .insert("w1:p9".into(), process);
+    let plan = ClosePlan::capture(
+        &backend,
+        CloseRequest {
+            kind: CloseKind::Tabs,
+            ids: vec!["w1:t1".into()],
+        },
+        "term-a",
+        "/tmp",
+    )
+    .unwrap();
+    let report = execute(&backend, &plan);
+    assert_eq!(report.completed, 2);
+    assert_eq!(*backend.closed.borrow(), ["w1:p2", "w1:p9"]);
+}
+
+#[test]
+fn tests_that_keeper_disappearance_keeps_its_identity_in_the_failed_report() {
+    let mut backend = Memory::new();
+    backend.keeper_available = true;
+    backend.keeper_disappears = true;
+    let report = execute(&backend, &backend.plan(CloseKind::Clear, &["w1"]));
+    assert_eq!((report.completed, report.failed), (0, 2));
+    assert_eq!(report.keeper.unwrap().pane_id, "w1:p9");
+    assert!(backend.closed.borrow().is_empty());
+}
+
+#[test]
+fn tests_that_membership_change_during_execution_stops_remaining_closures() {
+    let mut backend = Memory::new();
+    backend.after_close = Some(|t| {
+        let mut pane = t.panes[0].clone();
+        pane.pane_id = "w1:p7".into();
+        pane.terminal_id = Some("unreviewed".into());
+        t.panes.push(pane);
+    });
+    let report = execute(&backend, &backend.plan(CloseKind::Tabs, &["w1:t1"]));
+    assert_eq!((report.completed, report.failed), (1, 1));
+    assert_eq!(*backend.closed.borrow(), ["w1:p2"]);
+}
+
+#[test]
+fn tests_that_replaced_terminal_identity_is_not_closed() {
+    let backend = Memory::new();
+    let plan = backend.plan(CloseKind::Panes, &["w1:p1"]);
+    backend.topology.borrow_mut().panes[0].terminal_id = Some("replacement".into());
+    let report = execute(&backend, &plan);
+    assert_eq!(report.failed, 1);
+    assert!(backend.closed.borrow().is_empty());
+}
+
+#[test]
+fn tests_that_implicit_worktree_group_closure_is_rejected_before_mutation() {
+    let backend = Memory::new();
+    backend.topology.borrow_mut().workspaces=serde_json::from_value(serde_json::json!([
+        {"workspace_id":"w1","label":"root","worktree":{"repo_key":"repo","is_linked_worktree":false}},
+        {"workspace_id":"w2","label":"linked","worktree":{"repo_key":"repo","is_linked_worktree":true}}
+    ])).unwrap();
+    let plan = ClosePlan::capture(
+        &backend,
+        CloseRequest {
+            kind: CloseKind::Workspaces,
+            ids: vec!["w1".into()],
+        },
+        "w1:p1",
+        "/tmp",
+    );
+    assert!(
+        plan.is_err(),
+        "last pane can cascade to unselected linked workspaces when Herdr confirm_close=false"
+    );
+    assert!(backend.closed.borrow().is_empty());
 }
