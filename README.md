@@ -83,6 +83,78 @@ Ferry merges workspaces inside the current Herdr session. It preserves each tab 
 
 Herdr named sessions are separate server processes and Herdr 0.8 has no cross-session pane-transfer command. Ferry therefore does not claim to merge named sessions; that would require a transfer primitive in Herdr itself.
 
+## Close and Clear
+
+The move shortcut stays `prefix+m`. Open the separate destructive workflow with:
+
+```sh
+herdr plugin action invoke shadowfax.ferry.open-close
+herdr plugin action invoke shadowfax.ferry.clear-ft
+```
+
+Close panes, Close tabs, and Close workspaces fuzzy-search live targets and support
+Space/Tab/Shift-Tab selection and Ctrl-a for visible matches. Clear workspace
+selects exactly one workspace. Enter opens a review of workspace/tab/pane IDs,
+terminal identities, foreground program names and PIDs, and cwd. Scroll the review
+with arrow or page keys; type `close` or `clear` and press Enter to confirm. Esc
+goes back and Ctrl-c cancels before confirmation. F5 refreshes the target list.
+
+`clear-ft` finds the exact label `ft` in the current Herdr session. One match opens
+its review directly; duplicate labels require choosing one workspace by ID. A
+missing label produces an actionable notification. It never creates a session
+named `ft` or silently clears several workspaces.
+
+Clear snapshots old tabs, creates a new `shell` tab with `--no-focus`, verifies its
+live identity, and only then closes reviewed terminals. The shell uses the first
+reviewed pane's cwd (or the user's home when none was reported). Its workspace ID
+stays the same; concurrent new tabs and the keeper are excluded from closure.
+A failed keeper creation leaves old terminals untouched. A partial failure leaves
+the keeper in place.
+
+Herdr removes empty tabs and workspaces when their last pane closes. Ferry uses
+that behavior instead of broad tab/workspace deletion, so it never expands a
+confirmed selection to include new descendants. Closing the last pane of a root worktree workspace can cascade to its linked
+workspaces. Ferry rejects closing all panes of that root while linked workspaces
+exist, even if Herdr confirmation is disabled: close the linked workspaces first
+or use Clear. Ferry never authorizes an implicit whole-group close. There is no undo for terminated processes.
+
+Before each mutation Ferry checks live canonical IDs, terminal IDs, selected
+membership, and shell/foreground process identity. Moved or replaced targets,
+new members of selected old tabs, or changed foreground programs stop remaining
+work for a fresh review. Already absent terminals are skipped. Herdr does not
+provide an atomic compare-and-close API: an external change in the small interval
+between validation and closure remains possible. Foreground inspection does not
+list every detached/background descendant of a terminal.
+
+Execution is a Herdr-owned plugin action (`shadowfax.ferry.execute-close`), so
+closing the invoking pane, tab, workspace, or popup cannot terminate the worker.
+The caller is ordered last. After confirmation, closing the popup does **not**
+cancel execution. Completed, already-closed, and failed pane counts appear in the
+result and notification. Private snapshots and full error reports are retained in
+`$HERDR_PLUGIN_STATE_DIR/close-jobs/` (`*.report.txt` and `*.result.json`). Claimed
+requests are never retried automatically; a `*.running.json` without a result
+means execution is still running or was interrupted and must be inspected before
+starting a fresh review. Unclaimed confirmations expire after 60 seconds.
+
+Menu can launch the workflows without duplicating their confirmation or close
+logic. Add these entries to your Menu config, choosing unused keys:
+
+```toml
+[[items]]
+type = "shell"
+key = "k"
+label = "Close…"
+command = '"$HERDR_BIN_PATH" plugin action invoke shadowfax.ferry.open-close'
+mode = "detached"
+
+[[items]]
+type = "shell"
+key = "F"
+label = "Clear ft…"
+command = '"$HERDR_BIN_PATH" plugin action invoke shadowfax.ferry.clear-ft'
+mode = "detached"
+```
+
 ## Development
 
 ```sh
@@ -90,7 +162,13 @@ cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 cargo build --release --locked
+python3 tests/real_herdr.py --evidence-dir /tmp/ferry-test-evidence
 ```
+
+The optional real-Herdr gate starts its own named server and background PTY client
+with isolated config/state, links only that test environment, and stops only its
+owned session. It checks real process death, keeper/cwd preservation, unselected
+terminal/focus preservation, and worker survival when its invoker closes.
 
 ## Remove
 
