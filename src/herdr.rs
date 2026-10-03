@@ -21,6 +21,17 @@ pub struct WorkspaceInfo {
     pub pane_count: usize,
     #[serde(default)]
     pub focused: bool,
+    #[serde(default)]
+    pub worktree: Option<WorktreeInfo>,
+}
+
+/// Git worktree membership Herdr reports for a workspace. Workspaces sharing a `repo_key`
+/// form a group, and closing the group's root (the non-linked checkout) closes them all.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct WorktreeInfo {
+    pub repo_key: String,
+    #[serde(default)]
+    pub is_linked_worktree: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -70,6 +81,14 @@ pub struct MovedPane {
     pub workspace_id: String,
 }
 
+/// How Herdr answered a close request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseOutcome {
+    Closed,
+    /// Herdr no longer knows the target: someone else closed it first.
+    Missing,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct InvocationContext {
     pub focused_pane_id: Option<String>,
@@ -105,6 +124,11 @@ impl Herdr {
         Self {
             binary: binary.into(),
         }
+    }
+
+    /// The Herdr executable this client runs, for handing to processes Ferry starts.
+    pub(crate) fn binary(&self) -> &Path {
+        &self.binary
     }
 
     pub fn topology(&self) -> Result<Topology> {
@@ -234,6 +258,18 @@ impl Herdr {
         Ok(())
     }
 
+    pub(crate) fn close_pane(&self, pane_id: &str) -> Result<CloseOutcome> {
+        self.close("pane", pane_id)
+    }
+
+    pub(crate) fn close_tab(&self, tab_id: &str) -> Result<CloseOutcome> {
+        self.close("tab", tab_id)
+    }
+
+    pub(crate) fn close_workspace(&self, workspace_id: &str) -> Result<CloseOutcome> {
+        self.close("workspace", workspace_id)
+    }
+
     pub fn notify(&self, body: &str) -> Result<()> {
         let body = body.chars().take(220).collect::<String>();
         self.output([
@@ -244,6 +280,28 @@ impl Herdr {
             OsStr::new(&body),
         ])?;
         Ok(())
+    }
+
+    /// Runs `herdr <noun> close <id>`. Herdr reports failures as JSON on stderr; its
+    /// `<noun>_not_found` code means the target is already gone, which a kill treats as done
+    /// rather than failed. Other errors surface with Herdr's own message.
+    fn close(&self, noun: &str, id: &str) -> Result<CloseOutcome> {
+        let output = self.command([noun, "close", id])?;
+        if output.status.success() {
+            return Ok(CloseOutcome::Closed);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match serde_json::from_str::<ErrorEnvelope>(stderr.trim()) {
+            Ok(envelope) if envelope.error.code == format!("{noun}_not_found") => {
+                Ok(CloseOutcome::Missing)
+            }
+            Ok(envelope) => bail!("{}", envelope.error.message),
+            Err(_) => bail!(
+                "Herdr command failed with {}: {}",
+                output.status,
+                stderr.trim()
+            ),
+        }
     }
 
     fn move_pane(&self, args: Vec<OsString>) -> Result<MovedPane> {
@@ -336,6 +394,18 @@ struct Envelope<T> {
 }
 
 #[derive(Deserialize)]
+struct ErrorEnvelope {
+    error: ErrorBody,
+}
+
+#[derive(Deserialize)]
+struct ErrorBody {
+    code: String,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Deserialize)]
 struct WorkspaceListResult {
     workspaces: Vec<WorkspaceInfo>,
 }
@@ -390,6 +460,24 @@ mod tests {
             .unwrap()
             .source_pane_id()
             .is_err());
+    }
+
+    #[test]
+    fn tests_that_workspace_worktree_membership_is_parsed() {
+        let linked: WorkspaceInfo = serde_json::from_str(
+            r#"{"workspace_id":"w1","worktree":{"repo_key":"k","repo_name":"repo","repo_root":"/r","checkout_path":"/r/wt","is_linked_worktree":true}}"#,
+        )
+        .unwrap();
+        let plain: WorkspaceInfo = serde_json::from_str(r#"{"workspace_id":"w2"}"#).unwrap();
+
+        assert_eq!(
+            linked.worktree,
+            Some(WorktreeInfo {
+                repo_key: "k".into(),
+                is_linked_worktree: true,
+            })
+        );
+        assert_eq!(plain.worktree, None);
     }
 
     #[test]

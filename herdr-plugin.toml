@@ -1,8 +1,8 @@
 id = "shadowfax.ferry"
 name = "Herdr Ferry"
-version = "0.2.0"
+version = "0.3.0"
 min_herdr_version = "0.8.0"
-description = "Move live panes and tabs or merge workspaces from a native popup."
+description = "Move, merge, or kill live panes, tabs, and workspaces from a native popup."
 platforms = ["macos", "linux"]
 
 [[build]]
@@ -11,7 +11,7 @@ command = ["cargo", "build", "--release", "--locked"]
 [[actions]]
 id = "open"
 title = "Open Ferry"
-description = "Move panes or tabs, or merge one workspace into another."
+description = "Move panes or tabs, merge a workspace, or kill panes, tabs, and workspaces."
 contexts = ["pane"]
 command = ["./target/release/herdr-ferry", "open"]
 

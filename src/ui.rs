@@ -79,21 +79,25 @@ pub fn render(app: &App, frame: &mut Frame) {
             list_area,
         );
     } else {
+        let check = if app.kill_mode() {
+            ("✕ ", Color::LightRed)
+        } else {
+            ("✓ ", Color::Cyan)
+        };
         let items = rows
             .into_iter()
             .map(|row| {
                 let (marker, marker_style) = if row.checked {
                     (
-                        "✓ ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
+                        check.0,
+                        Style::default().fg(check.1).add_modifier(Modifier::BOLD),
                     )
                 } else {
                     match row.tone {
                         RowTone::Normal => ("  ", Style::default()),
                         RowTone::Current => ("● ", Style::default().fg(Color::Green)),
                         RowTone::Create => ("＋ ", Style::default().fg(Color::Cyan)),
+                        RowTone::Danger => ("✕ ", Style::default().fg(Color::LightRed)),
                     }
                 };
                 ListItem::new(Line::from(vec![
@@ -118,7 +122,12 @@ pub fn render(app: &App, frame: &mut Frame) {
     }
 
     let status = if let Some(error) = app.failure() {
-        Paragraph::new(format!("Move failed: {error}"))
+        let label = if app.kill_mode() {
+            "Can't kill"
+        } else {
+            "Move failed"
+        };
+        Paragraph::new(format!("{label}: {error}"))
             .style(Style::default().fg(Color::LightRed))
             .wrap(Wrap { trim: true })
     } else if let Some(working) = app.working() {
@@ -127,6 +136,10 @@ pub fn render(app: &App, frame: &mut Frame) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )
+    } else if let Some(notice) = app.notice() {
+        Paragraph::new(notice)
+            .style(Style::default().fg(Color::Yellow))
+            .wrap(Wrap { trim: true })
     } else {
         Paragraph::new("")
     };
@@ -139,6 +152,7 @@ pub fn render(app: &App, frame: &mut Frame) {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{backend::TestBackend, Terminal};
 
     use crate::herdr::{PaneInfo, TabInfo, Topology, WorkspaceInfo};
@@ -155,6 +169,7 @@ mod tests {
                     tab_count: 1,
                     pane_count: 1,
                     focused: true,
+                    worktree: None,
                 }],
                 tabs: vec![TabInfo {
                     tab_id: "w1:t1".into(),
@@ -198,11 +213,57 @@ mod tests {
         let rendered = render_text(&app());
 
         assert!(rendered.contains("Ferry"));
-        assert!(rendered.contains("What should cross?"));
         assert!(rendered.contains("Move a pane"));
         assert!(rendered.contains("Move a whole tab"));
         assert!(rendered.contains("Merge a workspace"));
-        assert!(rendered.contains("p/t/w shortcut"));
+    }
+
+    #[test]
+    fn tests_that_the_entry_screen_lists_kill_actions_and_shortcuts() {
+        let rendered = render_text(&app());
+
+        assert!(rendered.contains("What should Ferry do?"));
+        assert!(rendered.contains("Kill panes"));
+        assert!(rendered.contains("Kill tabs"));
+        assert!(rendered.contains("Kill workspaces"));
+        assert!(rendered.contains("p/t/w move"));
+        assert!(rendered.contains("P/T/W kill"));
+    }
+
+    #[test]
+    fn tests_that_checked_kill_targets_render_with_a_cross() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+        let rendered = render_text(&app);
+
+        assert!(rendered.contains("✕ agent"));
+        assert!(!rendered.contains('✓'));
+    }
+
+    #[test]
+    fn tests_that_the_review_screen_shows_targets_warnings_and_keys() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let rendered = render_text(&app);
+
+        assert!(rendered.contains("Kill pane “agent”?"));
+        assert!(rendered.contains("✕ agent"));
+        assert!(rendered.contains("1 agent working · includes this pane"));
+        assert!(rendered.contains("y kill"));
+        assert!(!rendered.contains("search panes"));
+    }
+
+    #[test]
+    fn tests_that_kill_refusals_read_as_cant_kill() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
+        app.set_failure("pane is gone");
+
+        assert!(render_text(&app).contains("Can't kill: pane is gone"));
     }
 
     #[test]

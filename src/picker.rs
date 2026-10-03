@@ -3,6 +3,7 @@ use ratatui::crossterm::event::{self, Event};
 
 use crate::app::{App, InputOutcome};
 use crate::herdr::Herdr;
+use crate::kill_ops;
 use crate::move_ops::Mover;
 use crate::ui;
 
@@ -82,6 +83,17 @@ fn run_picker(
                         let _ = herdr.notify(&summary.message);
                         return Ok(());
                     }
+                    Err(error) => app.set_failure(format!("{error:#}")),
+                }
+            }
+            InputOutcome::Kill(plan) => {
+                // Hand off and exit at once: the plan may close this popup's own tab, and the
+                // detached executor reports the outcome as a notification.
+                let started = std::env::current_exe()
+                    .context("could not locate the Ferry binary")
+                    .and_then(|ferry| kill_ops::spawn_executor(&ferry, herdr, &plan));
+                match started {
+                    Ok(_) => return Ok(()),
                     Err(error) => app.set_failure(format!("{error:#}")),
                 }
             }

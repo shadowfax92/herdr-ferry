@@ -528,6 +528,7 @@ mod tests {
                 tab_count: 1,
                 pane_count: 2,
                 focused: true,
+                worktree: None,
             }],
             tabs: vec![TabInfo {
                 tab_id: "w1:t1".into(),
