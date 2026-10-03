@@ -6,6 +6,7 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 
 use crate::fuzzy;
 use crate::herdr::{PaneInfo, TabInfo, Topology, WorkspaceInfo};
+use crate::kill::KillScope;
 use crate::layout::SplitDirection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +75,7 @@ pub enum RowTone {
     Normal,
     Current,
     Create,
+    Danger,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,11 +95,13 @@ enum Stage {
     PaneDestination(Vec<PaneInfo>),
     TabDestination(Vec<TabInfo>),
     WorkspaceDestination(WorkspaceInfo),
+    KillTargets(KillScope),
 }
 
 #[derive(Clone, Debug)]
 enum Choice {
     Kind(MoveKind),
+    Kill(KillScope),
     Pane(PaneInfo),
     Tab(TabInfo),
     PaneTab(TabInfo),
@@ -182,16 +186,28 @@ impl App {
 
         if matches!(self.stage, Stage::Kind) {
             match key.code {
-                KeyCode::Char('p' | 'P') => {
+                KeyCode::Char('p') => {
                     self.enter_source(MoveKind::Pane);
                     return InputOutcome::Continue;
                 }
-                KeyCode::Char('t' | 'T') => {
+                KeyCode::Char('t') => {
                     self.enter_source(MoveKind::Tab);
                     return InputOutcome::Continue;
                 }
-                KeyCode::Char('w' | 'W') => {
+                KeyCode::Char('w') => {
                     self.enter_source(MoveKind::Workspace);
+                    return InputOutcome::Continue;
+                }
+                KeyCode::Char('P') => {
+                    self.enter_kill(KillScope::Panes);
+                    return InputOutcome::Continue;
+                }
+                KeyCode::Char('T') => {
+                    self.enter_kill(KillScope::Tabs);
+                    return InputOutcome::Continue;
+                }
+                KeyCode::Char('W') => {
+                    self.enter_kill(KillScope::Workspaces);
                     return InputOutcome::Continue;
                 }
                 _ => {}
@@ -276,7 +292,7 @@ impl App {
 
     pub fn heading(&self) -> String {
         match self.stage {
-            Stage::Kind => "What should cross?".into(),
+            Stage::Kind => "What should Ferry do?".into(),
             Stage::PaneSource => source_heading("pane", self.checked_sources.len()),
             Stage::TabSource => source_heading("tab", self.checked_sources.len()),
             Stage::WorkspaceSource => "Choose a workspace to merge".into(),
@@ -297,6 +313,7 @@ impl App {
             Stage::WorkspaceDestination(ref source) => {
                 format!("Merge {} into…", self.workspace_name(source))
             }
+            Stage::KillTargets(scope) => kill_heading(scope.noun(), self.checked_sources.len()),
         }
     }
 
@@ -309,13 +326,19 @@ impl App {
             Stage::PaneDestination(_) => "search destinations or name a new one",
             Stage::TabDestination(_) => "search workspaces or name a new one",
             Stage::WorkspaceDestination(_) => "search destination workspaces",
+            Stage::KillTargets(KillScope::Panes) => "search panes to kill",
+            Stage::KillTargets(KillScope::Tabs) => "search tabs to kill",
+            Stage::KillTargets(KillScope::Workspaces) => "search workspaces to kill",
         }
     }
 
     pub fn step(&self) -> usize {
         match self.stage {
             Stage::Kind => 1,
-            Stage::PaneSource | Stage::TabSource | Stage::WorkspaceSource => 2,
+            Stage::PaneSource
+            | Stage::TabSource
+            | Stage::WorkspaceSource
+            | Stage::KillTargets(_) => 2,
             Stage::PaneDestination(_)
             | Stage::TabDestination(_)
             | Stage::WorkspaceDestination(_) => 3,
@@ -324,19 +347,24 @@ impl App {
 
     pub fn trail(&self) -> &'static str {
         match self.stage {
-            Stage::Kind => "move  ›  source  ›  destination",
+            Stage::Kind => "move or kill  ›  pick  ›  finish",
             Stage::PaneSource => "pane  ›  source  ›  destination",
             Stage::TabSource => "tab  ›  source  ›  destination",
             Stage::WorkspaceSource => "workspace  ›  source  ›  destination",
             Stage::PaneDestination(_) => "pane  ›  source  ›  destination",
             Stage::TabDestination(_) => "tab  ›  source  ›  destination",
             Stage::WorkspaceDestination(_) => "workspace  ›  source  ›  destination",
+            Stage::KillTargets(KillScope::Panes) => "kill  ›  panes  ›  confirm",
+            Stage::KillTargets(KillScope::Tabs) => "kill  ›  tabs  ›  confirm",
+            Stage::KillTargets(KillScope::Workspaces) => "kill  ›  workspaces  ›  confirm",
         }
     }
 
     pub fn footer(&self) -> String {
         match self.stage {
-            Stage::Kind => "↑↓ navigate   enter choose   p/t/w shortcut   esc close".into(),
+            Stage::Kind => {
+                "↑↓ navigate   enter choose   p/t/w move   P/T/W kill   esc close".into()
+            }
             Stage::PaneSource | Stage::TabSource => {
                 "space/tab select   ctrl+a all   enter continue   esc back".into()
             }
@@ -348,7 +376,15 @@ impl App {
             }
             Stage::TabDestination(_) => "enter move   ↑↓ navigate   esc back".into(),
             Stage::WorkspaceDestination(_) => "enter merge   ↑↓ navigate   esc back".into(),
+            Stage::KillTargets(_) => {
+                "space/tab select   ctrl+a all   enter review   esc back".into()
+            }
         }
+    }
+
+    /// True while the user is choosing what to kill, so checked rows render as destructive.
+    pub fn kill_mode(&self) -> bool {
+        matches!(self.stage, Stage::KillTargets(_))
     }
 
     pub fn failure(&self) -> Option<&str> {
@@ -429,6 +465,11 @@ impl App {
                     .unwrap_or(0);
                 return InputOutcome::Continue;
             }
+            Stage::KillTargets(scope) => {
+                self.stage = Stage::Kind;
+                self.selected = kind_row(scope);
+                self.checked_sources.clear();
+            }
         }
         self.query.clear();
         self.failure = None;
@@ -447,13 +488,28 @@ impl App {
         self.failure = None;
     }
 
+    fn enter_kill(&mut self, scope: KillScope) {
+        self.stage = Stage::KillTargets(scope);
+        self.query.clear();
+        self.selected = 0;
+        self.checked_sources.clear();
+        self.failure = None;
+    }
+
     fn activate(&mut self, direction: SplitDirection) -> InputOutcome {
         let Some(candidate) = self.visible_candidates().get(self.selected).cloned() else {
             return InputOutcome::Continue;
         };
+        if matches!(self.stage, Stage::KillTargets(_)) {
+            return InputOutcome::Continue;
+        }
         match candidate.choice {
             Choice::Kind(kind) => {
                 self.enter_source(kind);
+                InputOutcome::Continue
+            }
+            Choice::Kill(scope) => {
+                self.enter_kill(scope);
                 InputOutcome::Continue
             }
             Choice::Pane(pane) => {
@@ -538,7 +594,10 @@ impl App {
     }
 
     fn is_source_stage(&self) -> bool {
-        matches!(self.stage, Stage::PaneSource | Stage::TabSource)
+        matches!(
+            self.stage,
+            Stage::PaneSource | Stage::TabSource | Stage::KillTargets(_)
+        )
     }
 
     fn toggle_current_source(&mut self) {
@@ -694,6 +753,9 @@ impl App {
             Stage::PaneDestination(source) => self.pane_destination_candidates(source),
             Stage::TabDestination(source) => self.tab_destination_candidates(source),
             Stage::WorkspaceDestination(source) => self.workspace_destination_candidates(source),
+            Stage::KillTargets(KillScope::Panes) => self.pane_source_candidates(),
+            Stage::KillTargets(KillScope::Tabs) => self.tab_source_candidates(),
+            Stage::KillTargets(KillScope::Workspaces) => self.workspace_target_candidates(),
         }
     }
 
@@ -770,6 +832,9 @@ impl App {
                 pinned: false,
                 source_key: None,
             },
+            kill_candidate(KillScope::Panes),
+            kill_candidate(KillScope::Tabs),
+            kill_candidate(KillScope::Workspaces),
         ]
     }
 
@@ -922,6 +987,20 @@ impl App {
                     pinned: false,
                     source_key: None,
                 }
+            })
+            .collect()
+    }
+
+    /// Merge sources made multi-selectable: killing, unlike merging, takes any number.
+    fn workspace_target_candidates(&self) -> Vec<Candidate> {
+        self.workspace_source_candidates()
+            .into_iter()
+            .map(|mut candidate| {
+                if let Choice::WorkspaceSource(workspace) = &candidate.choice {
+                    candidate.row.checked = self.checked_sources.contains(&workspace.workspace_id);
+                    candidate.source_key = Some(workspace.workspace_id.clone());
+                }
+                candidate
             })
             .collect()
     }
@@ -1172,6 +1251,49 @@ fn source_heading(noun: &str, count: usize) -> String {
         format!("Choose one or more {}s", noun)
     } else {
         format!("{count} {} selected", plural(noun, count))
+    }
+}
+
+fn kill_heading(noun: &str, count: usize) -> String {
+    if count == 0 {
+        format!("Choose {noun}s to kill")
+    } else {
+        format!("{count} {} selected", plural(noun, count))
+    }
+}
+
+/// Position of a scope's row on the first screen, below the three move rows.
+fn kind_row(scope: KillScope) -> usize {
+    match scope {
+        KillScope::Panes => 3,
+        KillScope::Tabs => 4,
+        KillScope::Workspaces => 5,
+    }
+}
+
+fn kill_candidate(scope: KillScope) -> Candidate {
+    let (title, detail) = match scope {
+        KillScope::Panes => (
+            "Kill panes",
+            "close terminals and everything running in them",
+        ),
+        KillScope::Tabs => ("Kill tabs", "close tabs with all of their panes"),
+        KillScope::Workspaces => (
+            "Kill workspaces",
+            "close workspaces with every tab and pane",
+        ),
+    };
+    Candidate {
+        choice: Choice::Kill(scope),
+        row: DisplayRow {
+            title: title.into(),
+            detail: detail.into(),
+            tone: RowTone::Danger,
+            checked: false,
+        },
+        search: String::new(),
+        pinned: false,
+        source_key: None,
     }
 }
 
@@ -1510,5 +1632,138 @@ mod tests {
     #[test]
     fn rejects_missing_invocation_panes() {
         assert!(App::new(topology(), "missing").is_err());
+    }
+
+    fn shift(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::SHIFT)
+    }
+
+    fn ctrl(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+    }
+
+    fn titles(app: &App) -> Vec<String> {
+        app.rows().into_iter().map(|row| row.title).collect()
+    }
+
+    #[test]
+    fn tests_that_the_first_screen_offers_move_and_kill_actions() {
+        let app = App::new(topology(), "w1:p1").unwrap();
+
+        assert_eq!(app.heading(), "What should Ferry do?");
+        assert_eq!(
+            titles(&app),
+            [
+                "Move a pane",
+                "Move a whole tab",
+                "Merge a workspace",
+                "Kill panes",
+                "Kill tabs",
+                "Kill workspaces",
+            ]
+        );
+        assert!(app.rows()[3..]
+            .iter()
+            .all(|row| row.tone == RowTone::Danger));
+    }
+
+    #[test]
+    fn tests_that_shift_letters_open_the_kill_pickers() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+
+        app.handle_key(shift('P'));
+        assert_eq!(app.heading(), "Choose panes to kill");
+        assert_eq!(app.prompt(), "search panes to kill");
+        assert_eq!(app.step(), 2);
+        assert_eq!(app.rows()[0].title, "focused-pane");
+        assert_eq!(app.rows()[0].tone, RowTone::Current);
+
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(shift('T'));
+        assert_eq!(app.heading(), "Choose tabs to kill");
+        assert!(app.rows()[0].title.contains("source / main"));
+
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(shift('W'));
+        assert_eq!(app.heading(), "Choose workspaces to kill");
+        assert_eq!(titles(&app), ["source", "target"]);
+    }
+
+    #[test]
+    fn tests_that_lowercase_letters_still_start_moves() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+
+        app.handle_key(key(KeyCode::Char('p')));
+        assert_eq!(app.heading(), "Choose one or more panes");
+
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(key(KeyCode::Char('t')));
+        assert_eq!(app.heading(), "Choose one or more tabs");
+    }
+
+    #[test]
+    fn tests_that_enter_on_a_kill_row_opens_its_picker() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        for _ in 0..5 {
+            app.handle_key(key(KeyCode::Down));
+        }
+
+        app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(app.heading(), "Choose workspaces to kill");
+    }
+
+    #[test]
+    fn tests_that_workspaces_can_be_multi_selected_for_killing() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(shift('W'));
+
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.heading(), "1 workspace selected");
+        assert!(app.rows()[0].checked);
+
+        app.handle_key(ctrl('a'));
+        assert_eq!(app.heading(), "2 workspaces selected");
+        assert!(app.rows().iter().all(|row| row.checked));
+    }
+
+    #[test]
+    fn tests_that_kill_pickers_filter_and_keep_checked_rows_visible() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(shift('P'));
+        app.handle_key(key(KeyCode::Char(' ')));
+
+        for character in "api".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+
+        assert_eq!(app.prompt(), "search panes to kill");
+        assert_eq!(app.heading(), "1 pane selected");
+        assert_eq!(titles(&app), ["focused-pane", "api-server"]);
+        assert!(app.rows()[0].checked);
+    }
+
+    #[test]
+    fn tests_that_escape_from_a_kill_picker_returns_to_its_row() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(shift('T'));
+        app.handle_key(key(KeyCode::Char(' ')));
+
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), InputOutcome::Continue);
+        assert_eq!(app.step(), 1);
+        assert_eq!(app.selected(), Some(4));
+
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.heading(), "Choose tabs to kill");
+        assert!(app.rows().iter().all(|row| !row.checked));
+    }
+
+    #[test]
+    fn tests_that_enter_in_a_kill_picker_never_starts_a_move() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(shift('P'));
+
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), InputOutcome::Continue);
+        assert!(!app.heading().starts_with("Move"));
     }
 }

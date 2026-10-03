@@ -5,6 +5,7 @@ pub mod app;
 pub mod fuzzy;
 pub mod herdr;
 pub mod keybindings;
+pub mod kill;
 pub mod layout;
 pub mod move_ops;
 pub mod picker;
