@@ -2,7 +2,7 @@
 
 # ⛴ Herdr Ferry
 
-**Move live panes and tabs, or merge whole Herdr workspaces.**
+**Move, merge, or kill live Herdr panes, tabs, and workspaces.**
 
 [![Herdr 0.8.0+](https://img.shields.io/badge/Herdr-0.8.0%2B-6c71c4)](https://herdr.dev)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-b7410e)](https://www.rust-lang.org/)
@@ -10,15 +10,15 @@
 
 </div>
 
-Ferry is a native Rust popup for the occasional move that should be deliberate but painless. It has no `fzf`, Node, or shell-script dependency.
+Ferry is a native Rust popup for the occasional move or cleanup that should be deliberate but painless. It has no `fzf`, Node, or shell-script dependency.
 
 Press `prefix+m`, then make three choices:
 
-1. Move panes, move whole tabs, or merge a workspace.
-2. Accept the focused pane/current tab/current workspace, or fuzzy-search every live source.
-3. Pick the destination.
+1. Move panes, move whole tabs, or merge a workspace — or kill panes, tabs, or workspaces.
+2. Accept the focused pane/current tab/current workspace, or fuzzy-search every live one.
+3. Pick the destination, or review the kill and confirm it with `y`.
 
-Pane and tab source screens use `fzf`-style multi-selection without depending on `fzf`: press `Space` or `Tab` to check rows and `Ctrl-a` to check every visible match. Pressing `Enter` without checking anything keeps the highlighted row as the single default.
+Pane and tab sources, and every kill picker, use `fzf`-style multi-selection without depending on `fzf`: press `Space` or `Tab` to check rows and `Ctrl-a` to check every visible match. Pressing `Enter` without checking anything keeps the highlighted row as the single default.
 
 Pane moves can target any existing tab, a new tab in any workspace, or a new workspace. Whole-tab moves target another workspace or a new one. Workspace merge appends every source tab to an existing destination in tab order; Herdr removes the source workspace once its final live pane has moved. The popup stays session-modal while you choose, so it never alters the tiled layout.
 
@@ -56,18 +56,31 @@ herdr plugin link . --enabled
 
 | Key | Action |
 | --- | --- |
-| `p` / `t` / `w` | Choose panes, tabs, or workspace merge on the first screen |
-| Type | Fuzzy-filter sources or destinations |
+| `p` / `t` / `w` | Move panes, move tabs, or merge a workspace from the first screen |
+| `P` / `T` / `W` | Kill panes, tabs, or workspaces from the first screen |
+| Type | Fuzzy-filter sources, destinations, or kill targets |
 | `Up` / `Down` | Navigate results |
-| `Space` / `Tab` | Toggle a pane or tab source and advance |
-| `Shift-Tab` | Toggle a pane or tab source and move back |
-| `Ctrl-a` | Toggle all visible pane or tab sources |
-| `Enter` | Continue with checked rows, or use the highlighted row by itself |
+| `Space` / `Tab` | Toggle a row and advance (pane and tab sources, kill pickers) |
+| `Shift-Tab` | Toggle a row and move back |
+| `Ctrl-a` | Toggle all visible rows |
+| `Enter` | Continue with checked rows, or use the highlighted row by itself; never kills |
+| `y` | Kill everything on the review screen |
+| `n` | Leave the review screen with selections kept |
 | `Alt-d` | Move a pane into an existing tab with a down split |
 | `Esc` | Go back one screen, then close |
 | `Ctrl-c` | Close immediately |
 
 Typing on the destination screen names a new tab or workspace when its `＋` row is chosen. Existing matches stay above the creation rows.
+
+## Killing panes, tabs, and workspaces
+
+Choose a kill row (or press `P`, `T`, or `W`), check targets, and press `Enter` to review them. The review lists every target and what goes with it: contained tabs and panes, agents that are working or blocked, and whether the pane Ferry was opened from is included. Only `y` kills; `n` or `Esc` returns to the picker with your selection intact.
+
+A kill is Herdr's own close: it ends every process running in each pane, and a tab or workspace disappears with its last pane. On `y`, Ferry hands the confirmed list to a detached process in its own session and closes the popup, so killing the tab or workspace you opened Ferry from still completes every confirmed close. The outcome arrives as a Herdr notification.
+
+Right before closing, Ferry re-reads Herdr. Targets that are already gone are counted, not failed; a tab or workspace that gained a pane after your review is skipped; one failure does not stop the rest. Kills are not atomic, and killed processes cannot be restored.
+
+Closing a worktree root workspace also closes its linked worktree workspaces. Ferry refuses a kill that would do that implicitly. Select the linked workspaces as well (Ferry closes them before the root), or kill them first.
 
 ## How whole-tab moves work
 
