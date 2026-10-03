@@ -21,6 +21,17 @@ pub struct WorkspaceInfo {
     pub pane_count: usize,
     #[serde(default)]
     pub focused: bool,
+    #[serde(default)]
+    pub worktree: Option<WorktreeInfo>,
+}
+
+/// Git worktree membership Herdr reports for a workspace. Workspaces sharing a `repo_key`
+/// form a group, and closing the group's root (the non-linked checkout) closes them all.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct WorktreeInfo {
+    pub repo_key: String,
+    #[serde(default)]
+    pub is_linked_worktree: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -390,6 +401,24 @@ mod tests {
             .unwrap()
             .source_pane_id()
             .is_err());
+    }
+
+    #[test]
+    fn tests_that_workspace_worktree_membership_is_parsed() {
+        let linked: WorkspaceInfo = serde_json::from_str(
+            r#"{"workspace_id":"w1","worktree":{"repo_key":"k","repo_name":"repo","repo_root":"/r","checkout_path":"/r/wt","is_linked_worktree":true}}"#,
+        )
+        .unwrap();
+        let plain: WorkspaceInfo = serde_json::from_str(r#"{"workspace_id":"w2"}"#).unwrap();
+
+        assert_eq!(
+            linked.worktree,
+            Some(WorktreeInfo {
+                repo_key: "k".into(),
+                is_linked_worktree: true,
+            })
+        );
+        assert_eq!(plain.worktree, None);
     }
 
     #[test]

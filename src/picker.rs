@@ -85,6 +85,7 @@ fn run_picker(
                     Err(error) => app.set_failure(format!("{error:#}")),
                 }
             }
+            InputOutcome::Kill(_) => {}
         }
     }
 }

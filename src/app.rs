@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -6,7 +7,7 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 
 use crate::fuzzy;
 use crate::herdr::{PaneInfo, TabInfo, Topology, WorkspaceInfo};
-use crate::kill::KillScope;
+use crate::kill::{KillPlan, KillScope};
 use crate::layout::SplitDirection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +69,7 @@ pub enum InputOutcome {
     MovePane(MovePaneRequest),
     MoveTab(MoveTabRequest),
     MergeWorkspace(MergeWorkspaceRequest),
+    Kill(KillPlan),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +98,7 @@ enum Stage {
     TabDestination(Vec<TabInfo>),
     WorkspaceDestination(WorkspaceInfo),
     KillTargets(KillScope),
+    KillConfirm(KillPlan),
 }
 
 #[derive(Clone, Debug)]
@@ -214,6 +217,20 @@ impl App {
             }
         }
 
+        if let Stage::KillConfirm(plan) = &self.stage {
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                return InputOutcome::Continue;
+            }
+            match key.code {
+                KeyCode::Char('y' | 'Y') => return InputOutcome::Kill(plan.clone()),
+                KeyCode::Char('n' | 'N') => return self.back(),
+                _ => {}
+            }
+        }
+
         if self.is_source_stage() {
             if key.modifiers.contains(KeyModifiers::CONTROL)
                 && matches!(key.code, KeyCode::Char('a' | 'A'))
@@ -287,7 +304,7 @@ impl App {
     }
 
     pub fn is_searchable(&self) -> bool {
-        !matches!(self.stage, Stage::Kind)
+        !matches!(self.stage, Stage::Kind | Stage::KillConfirm(_))
     }
 
     pub fn heading(&self) -> String {
@@ -314,6 +331,7 @@ impl App {
                 format!("Merge {} into…", self.workspace_name(source))
             }
             Stage::KillTargets(scope) => kill_heading(scope.noun(), self.checked_sources.len()),
+            Stage::KillConfirm(ref plan) => review_heading(plan),
         }
     }
 
@@ -329,6 +347,7 @@ impl App {
             Stage::KillTargets(KillScope::Panes) => "search panes to kill",
             Stage::KillTargets(KillScope::Tabs) => "search tabs to kill",
             Stage::KillTargets(KillScope::Workspaces) => "search workspaces to kill",
+            Stage::KillConfirm(_) => "",
         }
     }
 
@@ -341,7 +360,8 @@ impl App {
             | Stage::KillTargets(_) => 2,
             Stage::PaneDestination(_)
             | Stage::TabDestination(_)
-            | Stage::WorkspaceDestination(_) => 3,
+            | Stage::WorkspaceDestination(_)
+            | Stage::KillConfirm(_) => 3,
         }
     }
 
@@ -354,9 +374,8 @@ impl App {
             Stage::PaneDestination(_) => "pane  ›  source  ›  destination",
             Stage::TabDestination(_) => "tab  ›  source  ›  destination",
             Stage::WorkspaceDestination(_) => "workspace  ›  source  ›  destination",
-            Stage::KillTargets(KillScope::Panes) => "kill  ›  panes  ›  confirm",
-            Stage::KillTargets(KillScope::Tabs) => "kill  ›  tabs  ›  confirm",
-            Stage::KillTargets(KillScope::Workspaces) => "kill  ›  workspaces  ›  confirm",
+            Stage::KillTargets(scope) => kill_trail(scope),
+            Stage::KillConfirm(ref plan) => kill_trail(plan.scope),
         }
     }
 
@@ -379,12 +398,63 @@ impl App {
             Stage::KillTargets(_) => {
                 "space/tab select   ctrl+a all   enter review   esc back".into()
             }
+            Stage::KillConfirm(_) => "y kill   n/esc back   ↑↓ scroll   ctrl+c close".into(),
         }
     }
 
-    /// True while the user is choosing what to kill, so checked rows render as destructive.
+    /// True while the user is choosing or reviewing a kill, so rows and failures read as
+    /// destructive.
     pub fn kill_mode(&self) -> bool {
-        matches!(self.stage, Stage::KillTargets(_))
+        matches!(self.stage, Stage::KillTargets(_) | Stage::KillConfirm(_))
+    }
+
+    /// What else a reviewed kill takes down, shown under the review list: contained tabs and
+    /// panes, agents mid-task, and whether Ferry's own pane is among them.
+    pub fn notice(&self) -> Option<String> {
+        let Stage::KillConfirm(plan) = &self.stage else {
+            return None;
+        };
+        let pane_ids = plan
+            .targets
+            .iter()
+            .flat_map(|target| target.pane_ids.iter())
+            .collect::<Vec<_>>();
+        let mut facts = Vec::new();
+        if plan.scope == KillScope::Workspaces {
+            let tabs = self
+                .topology
+                .tabs
+                .iter()
+                .filter(|tab| {
+                    plan.targets
+                        .iter()
+                        .any(|target| target.id == tab.workspace_id)
+                })
+                .count();
+            facts.push(counted(tabs, "tab"));
+        }
+        if plan.scope != KillScope::Panes {
+            facts.push(counted(pane_ids.len(), "pane"));
+        }
+        for status in ["working", "blocked"] {
+            let agents = self
+                .topology
+                .panes
+                .iter()
+                .filter(|pane| {
+                    pane.agent.is_some()
+                        && pane.agent_status == status
+                        && pane_ids.contains(&&pane.pane_id)
+                })
+                .count();
+            if agents > 0 {
+                facts.push(format!("{} {status}", counted(agents, "agent")));
+            }
+        }
+        if pane_ids.contains(&&self.invoked_pane_id) {
+            facts.push(format!("includes this {}", plan.scope.noun()));
+        }
+        (!facts.is_empty()).then(|| facts.join(" · "))
     }
 
     pub fn failure(&self) -> Option<&str> {
@@ -470,6 +540,17 @@ impl App {
                 self.selected = kind_row(scope);
                 self.checked_sources.clear();
             }
+            Stage::KillConfirm(plan) => {
+                self.stage = Stage::KillTargets(plan.scope);
+                self.query.clear();
+                let first = plan.targets.first().map(|target| target.id.as_str());
+                self.selected = self
+                    .candidates()
+                    .iter()
+                    .position(|candidate| candidate.source_key.as_deref() == first)
+                    .unwrap_or(0);
+                return InputOutcome::Continue;
+            }
         }
         self.query.clear();
         self.failure = None;
@@ -500,8 +581,10 @@ impl App {
         let Some(candidate) = self.visible_candidates().get(self.selected).cloned() else {
             return InputOutcome::Continue;
         };
-        if matches!(self.stage, Stage::KillTargets(_)) {
-            return InputOutcome::Continue;
+        match self.stage {
+            Stage::KillTargets(scope) => return self.review_kill(scope, candidate),
+            Stage::KillConfirm(_) => return InputOutcome::Continue,
+            _ => {}
         }
         match candidate.choice {
             Choice::Kind(kind) => {
@@ -581,6 +664,37 @@ impl App {
                 })
             }
         }
+    }
+
+    /// Freezes the checked targets (or the highlighted one) into a plan and opens the review.
+    /// Nothing is killed here; only `y` on the review screen emits the plan.
+    fn review_kill(&mut self, scope: KillScope, highlighted: Candidate) -> InputOutcome {
+        let ids = if self.checked_sources.is_empty() {
+            highlighted.source_key.into_iter().collect()
+        } else {
+            self.checked_sources.clone()
+        };
+        let labels = self
+            .kill_target_candidates(scope)
+            .into_iter()
+            .filter_map(|candidate| Some((candidate.source_key?, candidate.row.title)))
+            .collect::<HashMap<_, _>>();
+        let chosen = ids
+            .into_iter()
+            .map(|id| {
+                let label = labels.get(&id).cloned().unwrap_or_else(|| id.clone());
+                (id, label)
+            })
+            .collect();
+        match KillPlan::build(scope, chosen, &self.topology) {
+            Ok(plan) => {
+                self.stage = Stage::KillConfirm(plan);
+                self.query.clear();
+                self.selected = 0;
+            }
+            Err(error) => self.failure = Some(format!("{error:#}")),
+        }
+        InputOutcome::Continue
     }
 
     fn tab_move_outcome(&self, destination: TabDestination) -> InputOutcome {
@@ -753,10 +867,37 @@ impl App {
             Stage::PaneDestination(source) => self.pane_destination_candidates(source),
             Stage::TabDestination(source) => self.tab_destination_candidates(source),
             Stage::WorkspaceDestination(source) => self.workspace_destination_candidates(source),
-            Stage::KillTargets(KillScope::Panes) => self.pane_source_candidates(),
-            Stage::KillTargets(KillScope::Tabs) => self.tab_source_candidates(),
-            Stage::KillTargets(KillScope::Workspaces) => self.workspace_target_candidates(),
+            Stage::KillTargets(scope) => self.kill_target_candidates(*scope),
+            Stage::KillConfirm(plan) => self.kill_review_candidates(plan),
         }
+    }
+
+    fn kill_target_candidates(&self, scope: KillScope) -> Vec<Candidate> {
+        match scope {
+            KillScope::Panes => self.pane_source_candidates(),
+            KillScope::Tabs => self.tab_source_candidates(),
+            KillScope::Workspaces => self.workspace_target_candidates(),
+        }
+    }
+
+    /// The reviewed targets in plan order, rendered with the picker's rows as inert ✕ rows.
+    fn kill_review_candidates(&self, plan: &KillPlan) -> Vec<Candidate> {
+        let picker = self.kill_target_candidates(plan.scope);
+        plan.targets
+            .iter()
+            .filter_map(|target| {
+                picker
+                    .iter()
+                    .find(|candidate| candidate.source_key.as_deref() == Some(&target.id))
+                    .cloned()
+            })
+            .map(|mut candidate| {
+                candidate.row.tone = RowTone::Danger;
+                candidate.row.checked = false;
+                candidate.source_key = None;
+                candidate
+            })
+            .collect()
     }
 
     fn kind_candidates(&self) -> Vec<Candidate> {
@@ -1262,6 +1403,29 @@ fn kill_heading(noun: &str, count: usize) -> String {
     }
 }
 
+fn review_heading(plan: &KillPlan) -> String {
+    match plan.targets.as_slice() {
+        [only] => format!("Kill {} “{}”?", plan.scope.noun(), only.label),
+        targets => format!(
+            "Kill {} {}?",
+            targets.len(),
+            plural(plan.scope.noun(), targets.len())
+        ),
+    }
+}
+
+fn kill_trail(scope: KillScope) -> &'static str {
+    match scope {
+        KillScope::Panes => "kill  ›  panes  ›  confirm",
+        KillScope::Tabs => "kill  ›  tabs  ›  confirm",
+        KillScope::Workspaces => "kill  ›  workspaces  ›  confirm",
+    }
+}
+
+fn counted(count: usize, noun: &str) -> String {
+    format!("{count} {}", plural(noun, count))
+}
+
 /// Position of a scope's row on the first screen, below the three move rows.
 fn kind_row(scope: KillScope) -> usize {
     match scope {
@@ -1320,6 +1484,8 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::*;
+    use crate::herdr::WorktreeInfo;
+    use crate::kill::KillTarget;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -1335,6 +1501,7 @@ mod tests {
                     tab_count: 2,
                     pane_count: 3,
                     focused: true,
+                    worktree: None,
                 },
                 WorkspaceInfo {
                     workspace_id: "w2".into(),
@@ -1343,6 +1510,7 @@ mod tests {
                     tab_count: 1,
                     pane_count: 1,
                     focused: false,
+                    worktree: None,
                 },
             ],
             tabs: vec![
@@ -1756,6 +1924,186 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.heading(), "Choose tabs to kill");
         assert!(app.rows().iter().all(|row| !row.checked));
+    }
+
+    fn review(scope_key: char) -> App {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(shift(scope_key));
+        app.handle_key(key(KeyCode::Enter));
+        app
+    }
+
+    #[test]
+    fn tests_that_enter_reviews_the_highlighted_target_alone() {
+        let app = review('P');
+
+        assert_eq!(app.heading(), "Kill pane “focused-pane”?");
+        assert_eq!(app.step(), 3);
+        assert!(!app.is_searchable());
+        assert_eq!(titles(&app), ["focused-pane"]);
+        assert_eq!(app.rows()[0].tone, RowTone::Danger);
+        assert_eq!(
+            app.notice().as_deref(),
+            Some("1 agent working · includes this pane")
+        );
+    }
+
+    #[test]
+    fn tests_that_the_review_lists_checked_targets_in_selection_order() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(shift('P'));
+        app.handle_key(key(KeyCode::End));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Home));
+        app.handle_key(key(KeyCode::Char(' ')));
+
+        app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(app.heading(), "Kill 2 panes?");
+        assert_eq!(titles(&app), ["api-server", "focused-pane"]);
+    }
+
+    #[test]
+    fn tests_that_y_kills_exactly_the_reviewed_targets() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(shift('T'));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            InputOutcome::Kill(KillPlan {
+                scope: KillScope::Tabs,
+                targets: vec![
+                    KillTarget {
+                        id: "w1:t1".into(),
+                        label: "source / main".into(),
+                        pane_ids: vec!["w1:p1".into(), "w1:p2".into()],
+                    },
+                    KillTarget {
+                        id: "w1:t2".into(),
+                        label: "source / logs".into(),
+                        pane_ids: vec!["w1:p3".into()],
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn tests_that_only_y_confirms_on_the_review_screen() {
+        let mut app = review('W');
+
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Char(' '),
+            KeyCode::Char('x'),
+            KeyCode::Tab,
+            KeyCode::Down,
+        ] {
+            assert_eq!(app.handle_key(key(code)), InputOutcome::Continue);
+        }
+        assert_eq!(app.handle_key(ctrl('y')), InputOutcome::Continue);
+        let alt_y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::ALT);
+        assert_eq!(app.handle_key(alt_y), InputOutcome::Continue);
+        assert_eq!(app.heading(), "Kill workspace “source”?");
+        assert!(matches!(app.handle_key(shift('Y')), InputOutcome::Kill(_)));
+    }
+
+    #[test]
+    fn tests_that_n_and_escape_return_to_the_picker_with_checks_kept() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(shift('P'));
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('n'))),
+            InputOutcome::Continue
+        );
+        assert_eq!(app.heading(), "2 panes selected");
+        assert_eq!(app.step(), 2);
+
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.heading(), "Kill 2 panes?");
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), InputOutcome::Continue);
+        assert_eq!(app.heading(), "2 panes selected");
+        assert_eq!(app.handle_key(ctrl('c')), InputOutcome::Cancel);
+    }
+
+    #[test]
+    fn tests_that_backing_out_of_a_single_review_keeps_the_cursor_on_it() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(shift('P'));
+        app.handle_key(key(KeyCode::End));
+        app.handle_key(key(KeyCode::Enter));
+
+        app.handle_key(key(KeyCode::Char('n')));
+
+        assert_eq!(app.rows()[app.selected().unwrap()].title, "api-server");
+        assert!(app.rows().iter().all(|row| !row.checked));
+    }
+
+    #[test]
+    fn tests_that_the_review_summarizes_contents_agents_and_the_current_workspace() {
+        let app = review('W');
+
+        assert_eq!(app.heading(), "Kill workspace “source”?");
+        assert_eq!(
+            app.notice().as_deref(),
+            Some("2 tabs · 3 panes · 1 agent working · includes this workspace")
+        );
+    }
+
+    #[test]
+    fn tests_that_tab_reviews_count_panes_and_blocked_agents() {
+        let mut topology = topology();
+        topology.panes[3].agent = Some("claude".into());
+        topology.panes[3].agent_status = "blocked".into();
+        let mut app = App::new(topology, "w1:p1").unwrap();
+        app.handle_key(shift('T'));
+        app.handle_key(key(KeyCode::End));
+
+        app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(app.heading(), "Kill tab “target / api”?");
+        assert_eq!(app.notice().as_deref(), Some("1 pane · 1 agent blocked"));
+    }
+
+    #[test]
+    fn tests_that_reviewing_a_quiet_pane_elsewhere_has_no_warnings() {
+        let mut app = App::new(topology(), "w1:p1").unwrap();
+        app.handle_key(shift('P'));
+        app.handle_key(key(KeyCode::End));
+
+        app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(app.heading(), "Kill pane “api-server”?");
+        assert_eq!(app.notice(), None);
+    }
+
+    #[test]
+    fn tests_that_kills_cascading_into_unselected_worktrees_are_refused_before_review() {
+        let mut topology = topology();
+        for (workspace, is_linked_worktree) in topology.workspaces.iter_mut().zip([false, true]) {
+            workspace.worktree = Some(WorktreeInfo {
+                repo_key: "repo".into(),
+                is_linked_worktree,
+            });
+        }
+        let mut app = App::new(topology, "w1:p1").unwrap();
+        app.handle_key(shift('W'));
+
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.heading(), "Choose workspaces to kill");
+        assert!(app.failure().unwrap().contains("“target”"));
+
+        app.handle_key(ctrl('a'));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.heading(), "Kill 2 workspaces?");
     }
 
     #[test]
