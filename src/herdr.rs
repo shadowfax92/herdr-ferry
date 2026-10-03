@@ -81,6 +81,14 @@ pub struct MovedPane {
     pub workspace_id: String,
 }
 
+/// How Herdr answered a close request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseOutcome {
+    Closed,
+    /// Herdr no longer knows the target: someone else closed it first.
+    Missing,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct InvocationContext {
     pub focused_pane_id: Option<String>,
@@ -116,6 +124,11 @@ impl Herdr {
         Self {
             binary: binary.into(),
         }
+    }
+
+    /// The Herdr executable this client runs, for handing to processes Ferry starts.
+    pub(crate) fn binary(&self) -> &Path {
+        &self.binary
     }
 
     pub fn topology(&self) -> Result<Topology> {
@@ -245,6 +258,18 @@ impl Herdr {
         Ok(())
     }
 
+    pub(crate) fn close_pane(&self, pane_id: &str) -> Result<CloseOutcome> {
+        self.close("pane", pane_id)
+    }
+
+    pub(crate) fn close_tab(&self, tab_id: &str) -> Result<CloseOutcome> {
+        self.close("tab", tab_id)
+    }
+
+    pub(crate) fn close_workspace(&self, workspace_id: &str) -> Result<CloseOutcome> {
+        self.close("workspace", workspace_id)
+    }
+
     pub fn notify(&self, body: &str) -> Result<()> {
         let body = body.chars().take(220).collect::<String>();
         self.output([
@@ -255,6 +280,28 @@ impl Herdr {
             OsStr::new(&body),
         ])?;
         Ok(())
+    }
+
+    /// Runs `herdr <noun> close <id>`. Herdr reports failures as JSON on stderr; its
+    /// `<noun>_not_found` code means the target is already gone, which a kill treats as done
+    /// rather than failed. Other errors surface with Herdr's own message.
+    fn close(&self, noun: &str, id: &str) -> Result<CloseOutcome> {
+        let output = self.command([noun, "close", id])?;
+        if output.status.success() {
+            return Ok(CloseOutcome::Closed);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match serde_json::from_str::<ErrorEnvelope>(stderr.trim()) {
+            Ok(envelope) if envelope.error.code == format!("{noun}_not_found") => {
+                Ok(CloseOutcome::Missing)
+            }
+            Ok(envelope) => bail!("{}", envelope.error.message),
+            Err(_) => bail!(
+                "Herdr command failed with {}: {}",
+                output.status,
+                stderr.trim()
+            ),
+        }
     }
 
     fn move_pane(&self, args: Vec<OsString>) -> Result<MovedPane> {
@@ -344,6 +391,18 @@ fn runtime_binary(injected: Option<OsString>) -> OsString {
 #[derive(Deserialize)]
 struct Envelope<T> {
     result: T,
+}
+
+#[derive(Deserialize)]
+struct ErrorEnvelope {
+    error: ErrorBody,
+}
+
+#[derive(Deserialize)]
+struct ErrorBody {
+    code: String,
+    #[serde(default)]
+    message: String,
 }
 
 #[derive(Deserialize)]

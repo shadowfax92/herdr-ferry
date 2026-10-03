@@ -6,11 +6,12 @@
 use std::collections::HashSet;
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::herdr::{Topology, WorkspaceInfo};
 
 /// The kind of Herdr container a kill closes. Every target in one kill has the same scope.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KillScope {
     Panes,
     Tabs,
@@ -29,20 +30,34 @@ impl KillScope {
 }
 
 /// Exactly what the user reviewed and confirmed: one scope and its targets in chosen order.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// It is also the handoff contract: the popup serializes it for the detached executor
+/// (`kill_ops`), which must close nothing outside it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KillPlan {
     pub scope: KillScope,
     pub targets: Vec<KillTarget>,
 }
 
 /// One pane, tab, or workspace to close, with the panes the review showed inside it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KillTarget {
     pub id: String,
     pub label: String,
     /// Every pane inside the target at review time. A tab or workspace that later holds a pane
     /// outside this list is no longer what the user confirmed and must not be closed.
     pub pane_ids: Vec<String>,
+}
+
+/// Where a confirmed target stands when the executor re-reads Herdr.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetState {
+    /// Present, holding only panes the review showed: safe to close.
+    Live,
+    /// Already closed by someone else.
+    Gone,
+    /// Holds a pane the review never showed; closing it would kill unconfirmed work.
+    Changed,
 }
 
 impl KillPlan {
@@ -122,6 +137,54 @@ impl KillPlan {
             );
         }
         Ok(())
+    }
+
+    /// Compares a target with fresh topology. Panes that left a tab or workspace since the
+    /// review are fine (less dies); a pane that arrived is not.
+    pub fn state_of(&self, target: &KillTarget, topology: &Topology) -> TargetState {
+        let Some(live) = panes_in(self.scope, &target.id, topology) else {
+            return TargetState::Gone;
+        };
+        if live.iter().all(|pane_id| target.pane_ids.contains(pane_id)) {
+            TargetState::Live
+        } else {
+            TargetState::Changed
+        }
+    }
+
+    /// Targets in closing order: the chosen order, except that targets inside a worktree root
+    /// go last. Linked worktrees then close first, so each root closes on its own instead of
+    /// tripping Herdr's group-close refusal.
+    pub fn execution_order<'a>(&'a self, topology: &Topology) -> Vec<&'a KillTarget> {
+        let mut targets = self.targets.iter().collect::<Vec<_>>();
+        targets.sort_by_key(|target| self.in_worktree_root(target, topology));
+        targets
+    }
+
+    fn in_worktree_root(&self, target: &KillTarget, topology: &Topology) -> bool {
+        let workspace_id = match self.scope {
+            KillScope::Workspaces => Some(target.id.as_str()),
+            KillScope::Tabs => topology
+                .tabs
+                .iter()
+                .find(|tab| tab.tab_id == target.id)
+                .map(|tab| tab.workspace_id.as_str()),
+            KillScope::Panes => topology
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == target.id)
+                .map(|pane| pane.workspace_id.as_str()),
+        };
+        topology
+            .workspaces
+            .iter()
+            .filter(|workspace| Some(workspace.workspace_id.as_str()) == workspace_id)
+            .any(|workspace| {
+                workspace
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|worktree| !worktree.is_linked_worktree)
+            })
     }
 
     /// Workspaces this plan leaves without any pane. Herdr closes those as well.
