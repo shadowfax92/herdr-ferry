@@ -217,6 +217,9 @@ impl App {
             }
         }
 
+        // The only place a kill is emitted. A plain y confirms; chords are dropped here, and
+        // Enter reaches `activate`, which ignores the review stage, so a double Enter or a
+        // stray Ctrl-y can never kill.
         if let Stage::KillConfirm(plan) = &self.stage {
             if key
                 .modifiers
