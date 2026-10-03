@@ -8,11 +8,14 @@ use herdr_ferry::kill_ops;
 use serde_json::{json, Value};
 use tempfile::{tempdir, TempDir};
 
-/// A scripted `herdr` that serves a fixed topology and logs every call.
+/// A scripted `herdr` that serves a topology, logs every call, and forgets what it closes.
 ///
-/// Close commands succeed unless the ID contains `gone` (Herdr's not-found error, as when a
-/// target vanishes between the executor's read and its close) or `broken` (any other error).
-/// While a `hold` file exists, `workspace list` blocks, keeping the executor alive mid-run.
+/// Each list is a JSON-lines file; a successful close appends the target's `"<kind>_id":"<id>"`
+/// fragment to `closed`, so later lists drop it and everything inside it (containers emptied
+/// by a close are not removed implicitly). Closes fail when the ID contains `gone` (Herdr's
+/// not-found error, as when a target vanishes between the executor's read and its close) or
+/// `broken` (any other error). While a `hold` file exists, `workspace list` blocks, keeping
+/// the executor alive mid-run.
 struct FakeHerdr {
     directory: TempDir,
     binary: PathBuf,
@@ -21,6 +24,10 @@ struct FakeHerdr {
 const SCRIPT: &str = r#"#!/bin/sh
 echo "$*" >> "$0.log"
 directory=$(dirname "$0")
+list() {
+  printf '{"result":{"%s":[%s]}}\n' "$1" \
+    "$(grep -v -F -f "$directory/closed" "$directory/$1.jsonl" | paste -sd, -)"
+}
 case "$1 $2" in
   "workspace list")
     waited=0
@@ -28,10 +35,10 @@ case "$1 $2" in
       sleep 0.05
       waited=$((waited + 1))
     done
-    cat "$directory/workspaces.json"
+    list workspaces
     ;;
-  "tab list") cat "$directory/tabs.json" ;;
-  "pane list") cat "$directory/panes.json" ;;
+  "tab list") list tabs ;;
+  "pane list") list panes ;;
   "pane close"|"tab close"|"workspace close")
     case "$3" in
       *gone*)
@@ -42,7 +49,10 @@ case "$1 $2" in
         echo '{"id":"cli:pane:close","error":{"code":"confirmation_required","message":"closing this pane would close a worktree group"}}' >&2
         exit 1
         ;;
-      *) echo '{"id":"cli","result":{"type":"ok"}}' ;;
+      *)
+        echo "\"$1_id\":\"$3\"" >> "$directory/closed"
+        echo '{"id":"cli","result":{"type":"ok"}}'
+        ;;
     esac
     ;;
   "notification show") echo '{"id":"cli","result":{"type":"ok"}}' ;;
@@ -59,13 +69,18 @@ impl FakeHerdr {
         let binary = directory.path().join("herdr");
         fs::write(&binary, SCRIPT).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
-        let write = |name: &str, key: &str, items: Vec<Value>| {
-            let body = json!({ "result": { key: items } }).to_string();
-            fs::write(directory.path().join(name), body).unwrap();
+        let write = |name: &str, items: Vec<Value>| {
+            let lines = items
+                .iter()
+                .map(|item| format!("{item}\n"))
+                .collect::<String>();
+            fs::write(directory.path().join(name), lines).unwrap();
         };
-        write("workspaces.json", "workspaces", workspaces);
-        write("tabs.json", "tabs", tabs);
-        write("panes.json", "panes", panes);
+        write("workspaces.jsonl", workspaces);
+        write("tabs.jsonl", tabs);
+        write("panes.jsonl", panes);
+        // BSD grep treats an empty pattern file as matching every line; start with a sentinel.
+        fs::write(directory.path().join("closed"), "\"none_id\":\"none\"\n").unwrap();
         Self { directory, binary }
     }
 
@@ -275,26 +290,109 @@ fn tests_that_linked_worktrees_close_before_their_root() {
     assert!(log.find("workspace close w2").unwrap() < log.find("workspace close w1").unwrap());
 }
 
-#[test]
-fn tests_that_a_cascade_found_at_execution_aborts_before_closing_anything() {
-    let fake = FakeHerdr::new(
+/// `repo` (w1) is a worktree root and `feature` its linked worktree; each has one tab.
+/// The linked tab also holds `<linked>:p9`, a pane nobody reviewed.
+fn worktree_group(linked_id: &str) -> FakeHerdr {
+    let linked_tab = format!("{linked_id}:t1");
+    FakeHerdr::new(
         vec![
             worktree("w1", "repo", false),
-            worktree("w2", "feature", true),
+            worktree(linked_id, "feature", true),
         ],
-        vec![tab("w1:t1"), tab("w2:t1")],
-        vec![pane("w1:p1", "w1:t1"), pane("w2:p1", "w2:t1")],
-    );
+        vec![tab("w1:t1"), tab(&linked_tab)],
+        vec![
+            pane("w1:p1", "w1:t1"),
+            pane(&format!("{linked_id}:p1"), &linked_tab),
+            pane(&format!("{linked_id}:p9"), &linked_tab),
+        ],
+    )
+}
 
-    let error = kill_ops::execute(
+#[test]
+fn tests_that_a_root_whose_linked_worktree_survives_is_never_closed() {
+    let fake = worktree_group("w2");
+
+    let report = kill_ops::execute(
         &fake.client(),
         &plan(KillScope::Workspaces, &[("w1", "repo", &["w1:p1"])]),
-    )
-    .err()
-    .unwrap();
+    );
 
-    assert!(error.to_string().contains("“feature”"));
+    assert_eq!(
+        report.unwrap().message(),
+        "Nothing killed · skipped “repo”: it would also close linked worktree “feature”"
+    );
     assert!(!fake.log().contains("close"));
+}
+
+#[test]
+fn tests_that_a_root_tab_stays_open_while_its_skipped_linked_tab_lives() {
+    let fake = worktree_group("w2");
+
+    let report = kill_ops::execute(
+        &fake.client(),
+        &plan(
+            KillScope::Tabs,
+            &[
+                ("w1:t1", "repo", &["w1:p1"]),
+                ("w2:t1", "feature", &["w2:p1"]),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        report.unwrap().message(),
+        "Nothing killed · skipped “feature”: it changed after review · \
+         skipped “repo”: it would also close linked worktree “feature”"
+    );
+    assert!(!fake.log().contains("tab close"));
+}
+
+#[test]
+fn tests_that_a_root_pane_stays_open_while_its_linked_workspace_lives() {
+    let fake = worktree_group("w2");
+
+    let report = kill_ops::execute(
+        &fake.client(),
+        &plan(
+            KillScope::Panes,
+            &[
+                ("w1:p1", "root shell", &["w1:p1"]),
+                ("w2:p1", "linked shell", &["w2:p1"]),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        report.unwrap().message(),
+        "Killed pane “linked shell” · \
+         skipped “root shell”: it would also close linked worktree “feature”"
+    );
+    let log = fake.log();
+    assert!(log.contains("pane close w2:p1\n"));
+    assert!(!log.contains("pane close w1:p1"));
+}
+
+#[test]
+fn tests_that_a_failed_linked_close_keeps_its_root_open() {
+    let fake = worktree_group("w2broken");
+
+    let report = kill_ops::execute(
+        &fake.client(),
+        &plan(
+            KillScope::Workspaces,
+            &[
+                ("w1", "repo", &["w1:p1"]),
+                ("w2broken", "feature", &["w2broken:p1", "w2broken:p9"]),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        report.unwrap().message(),
+        "Nothing killed · “feature” failed: closing this pane would close a worktree group · \
+         skipped “repo”: it would also close linked worktree “feature”"
+    );
+    assert!(!fake.log().contains("workspace close w1\n"));
 }
 
 #[test]

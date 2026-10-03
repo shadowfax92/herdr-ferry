@@ -4,7 +4,7 @@
 //!  popup (dies with its tab)             detached executor (own session)
 //!  ─────────────────────────             ─────────────────────────────────────────
 //!  y on review ── spawn_executor ──▶     herdr-ferry execute-kill
-//!  exits at once  (setsid; plan JSON     ├─ re-read topology, re-check cascades
+//!  exits at once  (setsid; plan JSON     ├─ re-read topology (and before worktree roots)
 //!                  in HERDR_FERRY_       ├─ close each target still as reviewed
 //!                  KILL_PLAN)            └─ one notification with the outcome
 //! ```
@@ -32,8 +32,9 @@ pub struct KillReport {
     pub scope: KillScope,
     pub killed: Vec<String>,
     pub gone: usize,
-    pub changed: Vec<String>,
-    pub failed: Vec<(String, String)>,
+    /// Skipped and failed targets as report phrases, in the order the executor reached them,
+    /// so a failure reads before the root close it blocked.
+    pub issues: Vec<String>,
 }
 
 impl KillReport {
@@ -42,9 +43,18 @@ impl KillReport {
             scope,
             killed: Vec::new(),
             gone: 0,
-            changed: Vec::new(),
-            failed: Vec::new(),
+            issues: Vec::new(),
         }
+    }
+
+    fn skip(&mut self, target: &KillTarget, reason: &str) {
+        self.issues
+            .push(format!("skipped “{}”: {reason}", target.label));
+    }
+
+    fn fail(&mut self, target: &KillTarget, error: &anyhow::Error) {
+        self.issues
+            .push(format!("“{}” failed: {error:#}", target.label));
     }
 
     /// One line for a Herdr notification, e.g. `Killed 2 panes · 1 pane already gone`.
@@ -58,40 +68,45 @@ impl KillReport {
         if self.gone > 0 {
             parts.push(format!("{} already gone", counted(self.gone, noun)));
         }
-        parts.extend(
-            self.changed
-                .iter()
-                .map(|label| format!("skipped “{label}”: it changed after review")),
-        );
-        parts.extend(
-            self.failed
-                .iter()
-                .map(|(label, error)| format!("“{label}” failed: {error}")),
-        );
+        parts.extend(self.issues.iter().cloned());
         parts.join(" · ")
     }
 }
 
 /// Closes every target that is still what the user reviewed.
 ///
-/// The topology is read once: Herdr IDs are allocated, not positional, so closing one target
-/// never renames another. A failure is recorded and the remaining targets still close. Killed
-/// processes cannot come back, so there is no rollback.
+/// Herdr IDs are allocated, not positional, so closing one target never renames another and
+/// one topology read serves most targets. Closes inside a worktree root come last and each
+/// re-reads first: a root's last tab or pane can cascade into linked worktrees that an earlier
+/// skip or failure left open, and such a close is skipped. A failure is recorded and the
+/// remaining targets still close. Killed processes cannot come back, so there is no rollback.
 pub fn execute(herdr: &Herdr, plan: &KillPlan) -> Result<KillReport> {
-    let topology = herdr.topology()?;
-    plan.check_cascade(&topology)?;
+    let mut topology = herdr.topology()?;
     let mut report = KillReport::new(plan.scope);
     for target in plan.execution_order(&topology) {
+        if plan.in_worktree_root(target, &topology) {
+            match herdr.topology() {
+                Ok(fresh) => topology = fresh,
+                Err(error) => {
+                    report.fail(target, &error);
+                    continue;
+                }
+            }
+        }
         match plan.state_of(target, &topology) {
             TargetState::Gone => report.gone += 1,
-            TargetState::Changed => report.changed.push(target.label.clone()),
-            TargetState::Live => match close(herdr, plan.scope, target) {
-                Ok(CloseOutcome::Closed) => report.killed.push(target.label.clone()),
-                Ok(CloseOutcome::Missing) => report.gone += 1,
-                Err(error) => report
-                    .failed
-                    .push((target.label.clone(), format!("{error:#}"))),
-            },
+            TargetState::Changed => report.skip(target, "it changed after review"),
+            TargetState::Live => {
+                if let Some(reason) = plan.cascade_reason(target, &topology) {
+                    report.skip(target, &reason);
+                    continue;
+                }
+                match close(herdr, plan.scope, target) {
+                    Ok(CloseOutcome::Closed) => report.killed.push(target.label.clone()),
+                    Ok(CloseOutcome::Missing) => report.gone += 1,
+                    Err(error) => report.fail(target, &error),
+                }
+            }
         }
     }
     Ok(report)

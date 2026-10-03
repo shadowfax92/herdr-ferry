@@ -80,7 +80,7 @@ A kill is Herdr's own close: it ends every process running in each pane, and a t
 
 Right before closing, Ferry re-reads Herdr. Targets that are already gone are counted, not failed; a tab or workspace that gained a pane after your review is skipped; one failure does not stop the rest. Kills are not atomic, and killed processes cannot be restored.
 
-Closing a worktree root workspace also closes its linked worktree workspaces. Ferry refuses a kill that would do that implicitly. Select the linked workspaces as well (Ferry closes them before the root), or kill them first.
+Closing a worktree root workspace also closes its linked worktree workspaces. Ferry refuses a kill that would do that implicitly. Select the linked workspaces as well (Ferry closes them before the root), or kill them first. If a linked workspace is still open when Ferry reaches its root, because that workspace's own close was skipped or failed, the root is skipped too.
 
 ## How whole-tab moves work
 

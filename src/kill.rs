@@ -97,46 +97,28 @@ impl KillPlan {
     /// tab or pane cascades silently when Herdr's `confirm_close` is off. The review must list
     /// everything that dies, so emptying a root while a linked workspace survives is refused.
     pub fn check_cascade(&self, topology: &Topology) -> Result<()> {
-        let emptied = self.emptied_workspaces(topology);
-        for root in topology
-            .workspaces
-            .iter()
-            .filter(|workspace| emptied.contains(workspace.workspace_id.as_str()))
-        {
-            let Some(group) = root
-                .worktree
-                .as_ref()
-                .filter(|worktree| !worktree.is_linked_worktree)
-            else {
-                continue;
-            };
-            let survivors = topology
-                .workspaces
-                .iter()
-                .filter(|other| {
-                    !emptied.contains(other.workspace_id.as_str())
-                        && other
-                            .worktree
-                            .as_ref()
-                            .is_some_and(|worktree| worktree.repo_key == group.repo_key)
-                })
-                .map(|other| format!("“{}”", workspace_name(other)))
-                .collect::<Vec<_>>();
-            if survivors.is_empty() {
-                continue;
-            }
-            let (noun, pronoun) = if survivors.len() == 1 {
-                ("worktree", "it")
-            } else {
-                ("worktrees", "them")
-            };
-            bail!(
-                "killing “{}” would also close its linked {noun} {}; select {pronoun} too",
-                workspace_name(root),
-                survivors.join(", ")
-            );
-        }
-        Ok(())
+        let emptied = self.emptied_workspaces(&self.targets, topology);
+        let Some((root, linked)) = cascade(&emptied, topology) else {
+            return Ok(());
+        };
+        let pronoun = if linked.len() == 1 { "it" } else { "them" };
+        bail!(
+            "killing “{}” would also close its {}; select {pronoun} too",
+            workspace_name(root),
+            linked_worktrees(&linked)
+        );
+    }
+
+    /// Why closing `target` now would take linked worktree workspaces down with it, if so.
+    ///
+    /// The executor asks right before each close inside a worktree root, against topology read
+    /// after the closes before it. A linked workspace whose own target was skipped or failed is
+    /// still open then, and closing the root's last tab or pane would cascade into it whenever
+    /// Herdr's `confirm_close` is off, killing panes nobody confirmed.
+    pub fn cascade_reason(&self, target: &KillTarget, topology: &Topology) -> Option<String> {
+        let emptied = self.emptied_workspaces(std::slice::from_ref(target), topology);
+        let (_, linked) = cascade(&emptied, topology)?;
+        Some(format!("it would also close {}", linked_worktrees(&linked)))
     }
 
     /// Compares a target with fresh topology. Panes that left a tab or workspace since the
@@ -161,7 +143,9 @@ impl KillPlan {
         targets
     }
 
-    fn in_worktree_root(&self, target: &KillTarget, topology: &Topology) -> bool {
+    /// Whether `target` lies inside a worktree root, whose closing can cascade into the
+    /// workspaces linked to it.
+    pub fn in_worktree_root(&self, target: &KillTarget, topology: &Topology) -> bool {
         let workspace_id = match self.scope {
             KillScope::Workspaces => Some(target.id.as_str()),
             KillScope::Tabs => topology
@@ -187,10 +171,13 @@ impl KillPlan {
             })
     }
 
-    /// Workspaces this plan leaves without any pane. Herdr closes those as well.
-    fn emptied_workspaces<'a>(&self, topology: &'a Topology) -> HashSet<&'a str> {
-        let ids = self
-            .targets
+    /// Workspaces that closing `targets` leaves without any pane. Herdr closes those as well.
+    fn emptied_workspaces<'a>(
+        &self,
+        targets: &[KillTarget],
+        topology: &'a Topology,
+    ) -> HashSet<&'a str> {
+        let ids = targets
             .iter()
             .map(|target| target.id.as_str())
             .collect::<HashSet<_>>();
@@ -247,6 +234,51 @@ pub(crate) fn panes_in(scope: KillScope, id: &str, topology: &Topology) -> Optio
         .map(|pane| pane.pane_id.clone())
         .collect();
     Some(panes)
+}
+
+/// The first emptied worktree root that still has open linked workspaces, with those
+/// workspaces: Herdr would close them together with the root.
+fn cascade<'a>(
+    emptied: &HashSet<&str>,
+    topology: &'a Topology,
+) -> Option<(&'a WorkspaceInfo, Vec<&'a WorkspaceInfo>)> {
+    topology
+        .workspaces
+        .iter()
+        .filter(|workspace| emptied.contains(workspace.workspace_id.as_str()))
+        .find_map(|root| {
+            let group = root
+                .worktree
+                .as_ref()
+                .filter(|worktree| !worktree.is_linked_worktree)?;
+            let linked = topology
+                .workspaces
+                .iter()
+                .filter(|other| {
+                    !emptied.contains(other.workspace_id.as_str())
+                        && other
+                            .worktree
+                            .as_ref()
+                            .is_some_and(|worktree| worktree.repo_key == group.repo_key)
+                })
+                .collect::<Vec<_>>();
+            (!linked.is_empty()).then_some((root, linked))
+        })
+}
+
+/// e.g. `linked worktree “feature”` or `linked worktrees “a”, “b”`.
+fn linked_worktrees(linked: &[&WorkspaceInfo]) -> String {
+    let names = linked
+        .iter()
+        .map(|workspace| format!("“{}”", workspace_name(workspace)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let noun = if linked.len() == 1 {
+        "worktree"
+    } else {
+        "worktrees"
+    };
+    format!("linked {noun} {names}")
 }
 
 fn all_selected(members: Vec<&str>, selected: &HashSet<&str>) -> bool {
